@@ -1,0 +1,511 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NeuraL Farm Control</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Local agent</p>
+        <div class="brand-row">
+          <h1>NeuraL Farm Control</h1>
+          <span class="version-badge" id="appVersion">v...</span>
+          <span class="machine-badge" id="machineUsage" title="Uso da máquina do agent">
+            <span>CPU --%</span>
+            <span>RAM --%</span>
+          </span>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <div class="status-pill" id="agentStatus">Conectando</div>
+        <button class="danger" id="shutdownAgentBtn" type="button">Encerrar agent</button>
+      </div>
+    </header>
+
+    <main class="shell">
+      <nav class="tabs" aria-label="Seções do painel">
+        <button class="tab-button active" id="accountsTab" type="button" data-tab-target="accountsPanel" aria-controls="accountsPanel" aria-selected="true">Contas</button>
+        <button class="tab-button" id="processesTab" type="button" data-tab-target="processesPanel" aria-controls="processesPanel" aria-selected="false">Processos</button>
+        <button class="tab-button" id="addAccountsTab" type="button" data-tab-target="addAccountsPanel" aria-controls="addAccountsPanel" aria-selected="false">Adicionar contas</button>
+        <button class="tab-button" id="categoriesTab" type="button" data-tab-target="categoriesPanel" aria-controls="categoriesPanel" aria-selected="false">Categorias</button>
+        <button class="tab-button" id="proxyTab" type="button" data-tab-target="proxyPanel" aria-controls="proxyPanel" aria-selected="false">Proxy</button>
+        <button class="tab-button" id="continuousTab" type="button" data-tab-target="continuousPanel" aria-controls="continuousPanel" aria-selected="false">Continuous</button>
+        <button class="tab-button" id="diagnosticsTab" type="button" data-tab-target="diagnosticsPanel" aria-controls="diagnosticsPanel" aria-selected="false">Diagnóstico</button>
+        <button class="tab-button" id="configTab" type="button" data-tab-target="configPanel" aria-controls="configPanel" aria-selected="false">Config</button>
+      </nav>
+
+      <section class="dashboard-strip" id="dashboardStrip" aria-label="Resumo do farm"></section>
+      <section class="performance-alert" id="performanceAlert" hidden></section>
+
+      <section class="queue-status" id="queueStatus" hidden>
+        <div>
+          <span id="queueStatusLabel">Fila de launch</span>
+          <strong id="queueStatusText"></strong>
+        </div>
+        <div class="queue-progress">
+          <span id="queueProgressBar"></span>
+        </div>
+      </section>
+
+      <section class="tab-panel active" id="accountsPanel" role="tabpanel" aria-labelledby="accountsTab">
+        <section class="panel accounts-table-panel">
+          <div class="section-title">
+            <h2>Contas</h2>
+            <button class="primary" id="launchAllBtn" type="button">Lançar habilitadas</button>
+          </div>
+          <div class="accounts-filter-bar" id="accountsFilterBar">
+            <label class="search-field">
+              <span>Busca</span>
+              <input id="accountSearch" autocomplete="off" placeholder="email, nick, notes, script, args..." />
+            </label>
+            <label>
+              <span>Categoria</span>
+              <select id="accountFilterCategory">
+                <option value="">Todas</option>
+              </select>
+            </label>
+            <label>
+              <span>Status</span>
+              <select id="accountFilterStatus">
+                <option value="">Todos</option>
+                <option value="online">Online</option>
+                <option value="starting">Iniciando</option>
+                <option value="stopped">Parada</option>
+                <option value="warning">Atenção</option>
+              </select>
+            </label>
+            <label>
+              <span>Enabled</span>
+              <select id="accountFilterEnabled">
+                <option value="">Todas</option>
+                <option value="enabled">Habilitadas</option>
+                <option value="disabled">Desabilitadas</option>
+              </select>
+            </label>
+            <label>
+              <span>Nick</span>
+              <select id="accountFilterNick">
+                <option value="">Todos</option>
+                <option value="with">Com nick</option>
+                <option value="without">Sem nick</option>
+              </select>
+            </label>
+            <button class="ghost" id="clearAccountFiltersBtn" type="button">Limpar</button>
+            <strong id="accountFilterCount">0 de 0</strong>
+          </div>
+          <div class="bulk-account-bar" id="bulkAccountBar" hidden>
+            <strong id="bulkAccountCount">0 selecionada(s)</strong>
+            <input id="bulkScriptName" autocomplete="off" placeholder="Script" />
+            <input id="bulkScriptParams" autocomplete="off" placeholder="ARG" />
+            <div class="world-control compact-world-control">
+              <select id="bulkWorldMode">
+                <option value="fixed">Fixo</option>
+                <option value="random-f2p">Random F2P</option>
+                <option value="random-p2p">Random P2P</option>
+              </select>
+              <input id="bulkWorld" type="number" min="1" value="301" />
+            </div>
+            <button class="ghost" id="applyBulkAccountsBtn" type="button">Aplicar campos</button>
+            <button class="danger" id="deleteBulkAccountsBtn" type="button">Excluir selecionadas</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th><input id="selectAllAccounts" class="account-enabled-checkbox" type="checkbox" aria-label="Selecionar todas as contas" title="Selecionar todas as contas" /></th>
+                  <th>Conta</th>
+                  <th>Notes</th>
+                  <th>Saúde</th>
+                  <th>Categoria</th>
+                  <th>Script</th>
+                  <th>Schedule</th>
+                  <th>ARG</th>
+                  <th>World</th>
+                  <th>Proxy</th>
+                  <th>Resumo</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="accountsBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+      </section>
+
+      <section class="tab-panel" id="processesPanel" role="tabpanel" aria-labelledby="processesTab" hidden>
+        <section class="panel processes-panel">
+          <div class="section-title">
+            <h2>Processos</h2>
+            <div class="row-actions">
+              <button class="ghost active-launches-only active" id="activeLaunchesOnlyBtn" type="button">Atuais</button>
+              <button class="ghost" id="showAllLaunchesBtn" type="button">Todos</button>
+              <button class="ghost" id="clearStoppedLaunchesBtn" type="button">Limpar parados</button>
+              <button class="danger" id="clearLaunchHistoryBtn" type="button">Limpar tudo</button>
+            </div>
+          </div>
+          <div id="launches" class="launch-list"></div>
+          <div id="launchLogViewer" class="log-viewer" hidden></div>
+        </section>
+      </section>
+
+      <section class="tab-panel" id="diagnosticsPanel" role="tabpanel" aria-labelledby="diagnosticsTab" hidden>
+        <section class="diagnostics-panel" id="diagnosticsContent"></section>
+      </section>
+
+      <section class="tab-panel" id="addAccountsPanel" role="tabpanel" aria-labelledby="addAccountsTab" hidden>
+        <section class="split">
+          <div class="panel">
+            <div class="section-title">
+              <h2>Adicionar conta</h2>
+            </div>
+            <form id="accountForm" class="stack">
+              <label>
+                Email
+                <input id="email" name="email" autocomplete="off" />
+              </label>
+              <label>
+                Senha
+                <input id="password" name="password" type="password" autocomplete="new-password" />
+              </label>
+              <label>
+                TOTP secret
+                <input id="totpSecret" name="totpSecret" autocomplete="off" />
+              </label>
+              <label>
+                Categoria
+                <select id="accountCategory" name="accountCategory"></select>
+              </label>
+              <button class="primary" type="submit">Adicionar</button>
+            </form>
+          </div>
+
+          <div class="panel">
+            <div class="section-title">
+              <h2>Bulk import</h2>
+            </div>
+            <form id="bulkImportForm" class="stack">
+              <label>
+                Contas
+                <textarea id="bulkAccounts" name="bulkAccounts" rows="8" spellcheck="false" placeholder="email:senha:totp_secret"></textarea>
+              </label>
+              <label>
+                Categoria
+                <select id="bulkAccountCategory" name="bulkAccountCategory"></select>
+              </label>
+              <button class="primary" type="submit">Importar contas</button>
+              <div id="bulkResult" class="bulk-result"></div>
+            </form>
+          </div>
+        </section>
+      </section>
+
+      <section class="tab-panel" id="categoriesPanel" role="tabpanel" aria-labelledby="categoriesTab" hidden>
+        <section class="split categories-layout">
+          <div class="panel">
+            <div class="section-title">
+              <h2>Criar categoria</h2>
+            </div>
+            <form id="categoryForm" class="stack">
+              <label>
+                Nome
+                <input id="categoryName" name="categoryName" autocomplete="off" placeholder="ranged-f2p" />
+              </label>
+              <button class="primary" type="submit">Adicionar categoria</button>
+            </form>
+          </div>
+
+          <div class="panel">
+            <div class="section-title">
+              <h2>Categorias</h2>
+            </div>
+            <div id="categoriesList" class="category-list"></div>
+          </div>
+        </section>
+      </section>
+
+      <section class="tab-panel" id="proxyPanel" role="tabpanel" aria-labelledby="proxyTab" hidden>
+        <section class="split">
+          <div class="panel">
+            <div class="section-title">
+              <h2>Adicionar proxy</h2>
+            </div>
+            <form id="proxyForm" class="stack">
+              <label>
+                Nome
+                <input id="proxyName" name="proxyName" autocomplete="off" placeholder="BR 01" />
+              </label>
+              <label>
+                Host/IP
+                <input id="proxyHost" name="proxyHost" autocomplete="off" placeholder="1.2.3.4" />
+              </label>
+              <label>
+                Porta
+                <input id="proxyPort" name="proxyPort" type="number" min="1" placeholder="8000" />
+              </label>
+              <label>
+                Usuário
+                <input id="proxyUsername" name="proxyUsername" autocomplete="off" />
+              </label>
+              <label>
+                Senha
+                <input id="proxyPassword" name="proxyPassword" type="password" autocomplete="new-password" />
+              </label>
+              <label class="toggle-row">
+                <input id="proxyEnabled" name="proxyEnabled" type="checkbox" checked />
+                Proxy ativo
+              </label>
+              <button class="primary" type="submit">Adicionar proxy</button>
+            </form>
+          </div>
+
+          <div class="panel">
+            <div class="section-title">
+              <h2>Bulk import proxy</h2>
+            </div>
+            <form id="bulkProxyForm" class="stack">
+              <label>
+                Proxies
+                <textarea id="bulkProxies" name="bulkProxies" rows="8" spellcheck="false" placeholder="nome:host:porta:usuario:senha"></textarea>
+              </label>
+              <button class="primary" type="submit">Importar proxies</button>
+              <div id="bulkProxyResult" class="bulk-result"></div>
+            </form>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="section-title">
+            <h2>Proxies cadastrados</h2>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Nome</th>
+                  <th>Host</th>
+                  <th>Porta</th>
+                  <th>Usuário</th>
+                  <th>Senha</th>
+                  <th>Status</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="proxiesBody"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section class="tab-panel" id="continuousPanel" role="tabpanel" aria-labelledby="continuousTab" hidden>
+        <section class="split continuous-layout">
+          <div class="panel">
+            <div class="section-title">
+              <h2>Motor</h2>
+              <div class="row-actions">
+                <button class="primary" id="continuousStartBtn" type="button">Start loop</button>
+                <button class="ghost" id="continuousStopBtn" type="button">Stop loop</button>
+                <button class="danger" id="stopAllBtn" type="button">Stop all</button>
+              </div>
+            </div>
+            <form id="continuousSettingsForm" class="settings-grid continuous-settings-grid">
+              <label class="toggle-row">
+                <input id="continuousEnabled" name="continuousEnabled" type="checkbox" />
+                Continuous ativo
+              </label>
+              <label>
+                Intervalo de checagem
+                <input id="continuousCheckInterval" name="continuousCheckInterval" type="number" min="5" />
+              </label>
+              <button class="primary" type="submit">Salvar motor</button>
+            </form>
+            <div class="status-grid">
+              <div>
+                <span>Status</span>
+                <strong id="continuousStatus">-</strong>
+              </div>
+              <div>
+                <span>Última checagem</span>
+                <strong id="continuousLastCheck">-</strong>
+              </div>
+              <div>
+                <span>Próxima ação</span>
+                <strong id="continuousNextCheck">-</strong>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="section-title">
+              <h2>Criar task</h2>
+              <button class="ghost" id="resetTaskFormBtn" type="button">Nova</button>
+            </div>
+            <form id="continuousTaskForm" class="task-grid">
+              <input id="taskId" name="taskId" type="hidden" />
+              <label>
+                Nome
+                <input id="taskName" name="taskName" autocomplete="off" placeholder="Ranged 70 F2P" />
+              </label>
+              <label>
+                Categoria
+                <select id="taskCategory" name="taskCategory"></select>
+              </label>
+              <label>
+                Script
+                <input id="taskScriptName" name="taskScriptName" autocomplete="off" />
+              </label>
+              <label>
+                Schedule
+                <input id="taskScheduleName" name="taskScheduleName" autocomplete="off" placeholder="nome exato no DreamBot" />
+              </label>
+              <label>
+                ARG
+                <input id="taskScriptParams" name="taskScriptParams" autocomplete="off" placeholder="Ranged70" />
+              </label>
+              <label>
+                World
+                <div class="world-control">
+                  <select id="taskWorldMode" name="taskWorldMode">
+                    <option value="fixed">Fixo</option>
+                    <option value="random-f2p">Random F2P</option>
+                    <option value="random-p2p">Random P2P</option>
+                  </select>
+                  <input id="taskWorld" name="taskWorld" type="number" min="1" />
+                </div>
+              </label>
+              <label>
+                Proxy
+                <div class="proxy-mode-control">
+                  <select id="taskProxyMode" name="taskProxyMode">
+                    <option value="account">Proxy da conta</option>
+                    <option value="task">Forçar proxy</option>
+                    <option value="none">Sem proxy</option>
+                  </select>
+                  <select id="taskProxyId" name="taskProxyId"></select>
+                </div>
+              </label>
+              <label>
+                Max instâncias
+                <input id="taskMaxInstances" name="taskMaxInstances" type="number" min="1" />
+              </label>
+              <label>
+                Delay
+                <input id="taskLaunchDelaySeconds" name="taskLaunchDelaySeconds" type="number" min="0" />
+              </label>
+              <label>
+                Cooldown
+                <input id="taskCooldownMinutes" name="taskCooldownMinutes" type="number" min="0" />
+              </label>
+              <label class="toggle-row">
+                <input id="taskEnabled" name="taskEnabled" type="checkbox" checked />
+                Task ativa
+              </label>
+              <button class="primary" type="submit">Salvar task</button>
+            </form>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="section-title">
+            <h2>Tasks</h2>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Status</th>
+                  <th>Nome</th>
+                  <th>Categoria</th>
+                  <th>Script</th>
+                  <th>Schedule</th>
+                  <th>ARG</th>
+                  <th>Proxy</th>
+                  <th>Max</th>
+                  <th>Cooldown</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="continuousTasksBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="section-title">
+            <h2>Log de decisões</h2>
+          </div>
+          <div id="continuousLogs" class="decision-log"></div>
+        </section>
+      </section>
+
+      <section class="tab-panel" id="configPanel" role="tabpanel" aria-labelledby="configTab" hidden>
+        <section class="panel settings-panel">
+        <div class="section-title">
+          <h2>Configuração</h2>
+          <button class="ghost" id="refreshBtn" type="button">Atualizar</button>
+        </div>
+        <form id="settingsForm" class="settings-grid">
+          <label>
+            Launcher
+            <input id="launcherPath" name="launcherPath" autocomplete="off" />
+          </label>
+          <label>
+            Script padrão
+            <input id="defaultScriptName" name="defaultScriptName" autocomplete="off" />
+          </label>
+          <label>
+            World
+            <input id="defaultWorld" name="defaultWorld" type="number" min="1" />
+          </label>
+          <label>
+            Max instâncias
+            <input id="maxInstances" name="maxInstances" type="number" min="1" />
+          </label>
+          <label>
+            Delay
+            <input id="launchDelaySeconds" name="launchDelaySeconds" type="number" min="0" />
+          </label>
+          <label class="toggle-row">
+            <input id="useGeneratedTotp" name="useGeneratedTotp" type="checkbox" />
+            Passar código TOTP gerado
+          </label>
+          <label class="toggle-row">
+            <input id="useJagexBrowserLogin" name="useJagexBrowserLogin" type="checkbox" />
+            Login Jagex/browser
+          </label>
+          <label class="toggle-row">
+            <input id="jagexDebug" name="jagexDebug" type="checkbox" />
+            Debug Jagex login
+          </label>
+          <label class="toggle-row">
+            <input id="useStoredGameAccount" name="useStoredGameAccount" type="checkbox" />
+            Usar nickname salvo no DreamBot
+          </label>
+          <label class="settings-wide">
+            Discord webhook
+            <input id="discordWebhookUrl" name="discordWebhookUrl" autocomplete="off" placeholder="https://discord.com/api/webhooks/..." />
+          </label>
+          <label class="toggle-row">
+            <input id="discordWebhookEnabled" name="discordWebhookEnabled" type="checkbox" />
+            Enviar alerta no Discord
+          </label>
+          <label class="toggle-row">
+            <input id="discordNotifyOnStop" name="discordNotifyOnStop" type="checkbox" />
+            Avisar quando rotina parar
+          </label>
+          <label class="toggle-row">
+            <input id="discordIncludeLogTail" name="discordIncludeLogTail" type="checkbox" />
+            Incluir final do log
+          </label>
+          <button class="primary" type="submit">Salvar</button>
+        </form>
+      </section>
+      </section>
+    </main>
+    <div id="toast" class="toast" role="status"></div>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

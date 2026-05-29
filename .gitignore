@@ -1,0 +1,8 @@
+accounts.txt
+farm-state.json
+farm.json
+web-farm-state.json
+data/
+logs/
+*.bak
+*.tmp

@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NeuraL Farm Control</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Local agent</p>
+        <h1>NeuraL Farm Control</h1>
+      </div>
+      <div class="status-pill" id="agentStatus">Conectando</div>
+    </header>
+
+    <main class="shell">
+      <nav class="tabs" aria-label="Seções do painel">
+        <button class="tab-button active" id="accountsTab" type="button" data-tab-target="accountsPanel" aria-controls="accountsPanel" aria-selected="true">Contas</button>
+        <button class="tab-button" id="addAccountsTab" type="button" data-tab-target="addAccountsPanel" aria-controls="addAccountsPanel" aria-selected="false">Adicionar contas</button>
+        <button class="tab-button" id="proxyTab" type="button" data-tab-target="proxyPanel" aria-controls="proxyPanel" aria-selected="false">Proxy</button>
+        <button class="tab-button" id="configTab" type="button" data-tab-target="configPanel" aria-controls="configPanel" aria-selected="false">Config</button>
+      </nav>
+
+      <section class="tab-panel active" id="accountsPanel" role="tabpanel" aria-labelledby="accountsTab">
+        <section class="panel accounts-table-panel">
+          <div class="section-title">
+            <h2>Contas</h2>
+            <button class="primary" id="launchAllBtn" type="button">Lançar habilitadas</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th></th>
+                  <th>Conta</th>
+                  <th>Script</th>
+                  <th>ARG</th>
+                  <th>World</th>
+                  <th>Proxy</th>
+                  <th>TOTP</th>
+                  <th>Resumo</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="accountsBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="split process-split">
+          <div class="panel">
+            <div class="section-title">
+              <h2>Processos</h2>
+            </div>
+            <div id="launches" class="launch-list"></div>
+          </div>
+        </section>
+      </section>
+
+      <section class="tab-panel" id="addAccountsPanel" role="tabpanel" aria-labelledby="addAccountsTab" hidden>
+        <section class="split">
+          <div class="panel">
+            <div class="section-title">
+              <h2>Adicionar conta</h2>
+            </div>
+            <form id="accountForm" class="stack">
+              <label>
+                Email
+                <input id="email" name="email" autocomplete="off" />
+              </label>
+              <label>
+                Senha
+                <input id="password" name="password" type="password" autocomplete="new-password" />
+              </label>
+              <label>
+                TOTP secret
+                <input id="totpSecret" name="totpSecret" autocomplete="off" />
+              </label>
+              <button class="primary" type="submit">Adicionar</button>
+            </form>
+          </div>
+
+          <div class="panel">
+            <div class="section-title">
+              <h2>Bulk import</h2>
+            </div>
+            <form id="bulkImportForm" class="stack">
+              <label>
+                Contas
+                <textarea id="bulkAccounts" name="bulkAccounts" rows="8" spellcheck="false" placeholder="email:senha:totp_secret"></textarea>
+              </label>
+              <button class="primary" type="submit">Importar contas</button>
+              <div id="bulkResult" class="bulk-result"></div>
+            </form>
+          </div>
+        </section>
+      </section>
+
+      <section class="tab-panel" id="proxyPanel" role="tabpanel" aria-labelledby="proxyTab" hidden>
+        <section class="split">
+          <div class="panel">
+            <div class="section-title">
+              <h2>Adicionar proxy</h2>
+            </div>
+            <form id="proxyForm" class="stack">
+              <label>
+                Nome
+                <input id="proxyName" name="proxyName" autocomplete="off" placeholder="BR 01" />
+              </label>
+              <label>
+                Host/IP
+                <input id="proxyHost" name="proxyHost" autocomplete="off" placeholder="1.2.3.4" />
+              </label>
+              <label>
+                Porta
+                <input id="proxyPort" name="proxyPort" type="number" min="1" placeholder="8000" />
+              </label>
+              <label>
+                Usuário
+                <input id="proxyUsername" name="proxyUsername" autocomplete="off" />
+              </label>
+              <label>
+                Senha
+                <input id="proxyPassword" name="proxyPassword" type="password" autocomplete="new-password" />
+              </label>
+              <label class="toggle-row">
+                <input id="proxyEnabled" name="proxyEnabled" type="checkbox" checked />
+                Proxy ativo
+              </label>
+              <button class="primary" type="submit">Adicionar proxy</button>
+            </form>
+          </div>
+
+          <div class="panel">
+            <div class="section-title">
+              <h2>Bulk import proxy</h2>
+            </div>
+            <form id="bulkProxyForm" class="stack">
+              <label>
+                Proxies
+                <textarea id="bulkProxies" name="bulkProxies" rows="8" spellcheck="false" placeholder="nome:host:porta:usuario:senha"></textarea>
+              </label>
+              <button class="primary" type="submit">Importar proxies</button>
+              <div id="bulkProxyResult" class="bulk-result"></div>
+            </form>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="section-title">
+            <h2>Proxies cadastrados</h2>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Nome</th>
+                  <th>Host</th>
+                  <th>Porta</th>
+                  <th>Usuário</th>
+                  <th>Senha</th>
+                  <th>Status</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="proxiesBody"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section class="tab-panel" id="configPanel" role="tabpanel" aria-labelledby="configTab" hidden>
+        <section class="panel settings-panel">
+        <div class="section-title">
+          <h2>Configuração</h2>
+          <button class="ghost" id="refreshBtn" type="button">Atualizar</button>
+        </div>
+        <form id="settingsForm" class="settings-grid">
+          <label>
+            Launcher
+            <input id="launcherPath" name="launcherPath" autocomplete="off" />
+          </label>
+          <label>
+            Script padrão
+            <input id="defaultScriptName" name="defaultScriptName" autocomplete="off" />
+          </label>
+          <label>
+            World
+            <input id="defaultWorld" name="defaultWorld" type="number" min="1" />
+          </label>
+          <label>
+            Max instâncias
+            <input id="maxInstances" name="maxInstances" type="number" min="1" />
+          </label>
+          <label>
+            Delay
+            <input id="launchDelaySeconds" name="launchDelaySeconds" type="number" min="0" />
+          </label>
+          <label class="toggle-row">
+            <input id="useGeneratedTotp" name="useGeneratedTotp" type="checkbox" />
+            Passar código TOTP gerado
+          </label>
+          <button class="primary" type="submit">Salvar</button>
+        </form>
+      </section>
+      </section>
+    </main>
+
+    <div id="toast" class="toast" role="status"></div>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

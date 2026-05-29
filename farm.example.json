@@ -1,0 +1,62 @@
+{
+  "launcherPath": "C:\\Users\\gusta\\DreamBot\\Launcher.jar",
+  "accountsFile": ".\\data\\accounts.txt",
+  "defaultScriptName": "Teste",
+  "defaultWorld": 301,
+  "useGeneratedTotp": false,
+  "useJagexBrowserLogin": true,
+  "useStoredGameAccount": true,
+  "launchDelaySeconds": 20,
+  "maxInstances": 2,
+  "continuous": {
+    "enabled": false,
+    "checkIntervalSeconds": 30
+  },
+  "categories": [
+    "default",
+    "ranged-f2p",
+    "teste"
+  ],
+  "continuousTasks": [
+    {
+      "id": "task-ranged-f2p",
+      "name": "Ranged 70 F2P",
+      "category": "ranged-f2p",
+      "scriptName": "Teste",
+      "scriptParams": [
+        "Ranged70"
+      ],
+      "world": 301,
+      "worldMode": "fixed",
+      "proxyMode": "account",
+      "proxyId": "",
+      "maxInstances": 2,
+      "launchDelaySeconds": 20,
+      "cooldownMinutes": 30,
+      "enabled": false
+    }
+  ],
+  "proxies": [
+    {
+      "id": "proxy-1",
+      "name": "BR 01",
+      "host": "1.2.3.4",
+      "port": 8000,
+      "username": "",
+      "password": "",
+      "enabled": true
+    }
+  ],
+  "accounts": [
+    {
+      "index": 0,
+      "enabled": true,
+      "category": "ranged-f2p",
+      "scriptName": "Teste",
+      "world": 301,
+      "worldMode": "fixed",
+      "scriptParams": [],
+      "proxyId": ""
+    }
+  ]
+}

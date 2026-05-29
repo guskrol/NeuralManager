@@ -1,0 +1,31 @@
+{
+  "launcherPath": "C:\\Users\\gusta\\DreamBot\\Launcher.jar",
+  "accountsFile": ".\\accounts.txt",
+  "defaultScriptName": "Teste",
+  "defaultWorld": 301,
+  "useGeneratedTotp": false,
+  "launchDelaySeconds": 20,
+  "maxInstances": 2,
+  "proxies": [
+    {
+      "id": "proxy-1",
+      "name": "BR 01",
+      "host": "1.2.3.4",
+      "port": 8000,
+      "username": "",
+      "password": "",
+      "enabled": true
+    }
+  ],
+  "accounts": [
+    {
+      "index": 0,
+      "enabled": true,
+      "scriptName": "Teste",
+      "world": 301,
+      "worldMode": "fixed",
+      "scriptParams": [],
+      "proxyId": ""
+    }
+  ]
+}
