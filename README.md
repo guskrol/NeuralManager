@@ -2,7 +2,7 @@
 
 Painel local para controlar uma farm de contas Jagex no DreamBot, com cadastro de contas, categorias, proxies, launch individual, launch em fila, logs, diagnostico e tasks continuas.
 
-Versao atual: `0.2.27`
+Versao atual: `0.2.53`
 
 ## Visao geral
 
@@ -80,6 +80,7 @@ Use o modo rede apenas em rede confiavel. O painel local nao deve ser exposto pu
 - `data/logs/`: logs gerados por launches.
 - `1-INICIAR-LOCAL.bat`: inicia o agent local.
 - `2-INICIAR-REDE.bat`: inicia o agent aceitando conexoes na rede local.
+- `tools/nick-capture-helper/dist/NeuraLNickCapture.jar`: script helper usado para capturar automaticamente o nick/char name da conta.
 
 ## Aba Config
 
@@ -315,6 +316,42 @@ Os logs dessa automacao aparecem no log do processo com o prefixo:
 ```
 
 Se o login travar, abra o resumo do processo e confira essas linhas primeiro.
+
+## Captura automatica de nick
+
+O painel consegue tentar preencher o nick/char name da conta automaticamente.
+
+Para isso, o projeto inclui um script helper do DreamBot:
+
+```text
+tools/nick-capture-helper/dist/NeuraLNickCapture.jar
+```
+
+Quando voce inicia o painel pelos arquivos `.bat`, esse helper e copiado automaticamente para:
+
+```text
+%USERPROFILE%\DreamBot\Scripts\NeuraLNickCapture.jar
+```
+
+Esse arquivo aparece no DreamBot como:
+
+```text
+NeuraL Nick Capture
+```
+
+Fluxo esperado:
+
+1. Se a conta ainda nao tiver nick salvo, o painel abre primeiro o helper `NeuraL Nick Capture`.
+2. O helper espera a conta entrar no jogo.
+3. Quando consegue ler o nome do personagem, ele grava uma linha de log com o nick.
+4. O painel salva esse nick no `data/farm.json`.
+5. Depois disso, o painel fecha/limpa o helper e abre o script ou schedule real da conta.
+
+Depois que o nick ja esta salvo, o painel nao precisa rodar o helper novamente para aquela conta.
+
+Se voce copiar o projeto para outro PC, mantenha a pasta `tools/nick-capture-helper/dist/` junto do projeto. Ao rodar o `.bat`, ele tenta sincronizar o helper novamente na pasta de scripts do DreamBot daquele computador.
+
+Se o helper nao for encontrado, o launch ainda pode continuar, mas o painel registra no log que nao conseguiu instalar o helper de nick.
 
 ## Processos e logs
 
