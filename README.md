@@ -2,7 +2,7 @@
 
 Painel local para controlar uma farm de contas Jagex no DreamBot, com cadastro de contas, categorias, proxies, launch individual, launch em fila, logs, diagnostico e tasks continuas.
 
-Versao atual: `0.2.53`
+Versao atual: `0.2.91`
 
 ## Visao geral
 
@@ -20,10 +20,15 @@ Principais funcionalidades:
 - Deteccao de contas online com destaque visual.
 - Saude por conta, com ultimo launch registrado.
 - Consulta de stats OSRS por char name usando HiScores.
+- Aba Checker para verificar contas no HiScores, capturar nick automaticamente e marcar provaveis bans.
+- Status do Checker e TTL exibidos tambem na aba Contas.
 - Lista de processos atuais e historico de processos.
 - Aba Processos dedicada para logs e controle de processos.
 - Logs do launcher, stderr e DreamBot por processo.
+- Log dedicado do Checker em `data/logs/checker.log`.
 - Continuous Tasks para relancar contas automaticamente por categoria.
+- Suporte inicial para escolher DreamBot ou TRiBot por conta.
+- Webhook Discord para notificacoes de rotina/processos.
 - Diagnostico do setup.
 - Aba Diagnóstico dedicada para avisos e erros de setup.
 - Botao para encerrar o agent pelo painel.
@@ -78,6 +83,7 @@ Use o modo rede apenas em rede confiavel. O painel local nao deve ser exposto pu
 - `data/farm.json`: configuracoes, contas cadastradas, categorias, proxies e tasks.
 - `data/web-farm-state.json`: estado operacional, processos, logs e continuous.
 - `data/logs/`: logs gerados por launches.
+- `data/logs/checker.log`: log da fila do Checker.
 - `1-INICIAR-LOCAL.bat`: inicia o agent local.
 - `2-INICIAR-REDE.bat`: inicia o agent aceitando conexoes na rede local.
 - `tools/nick-capture-helper/dist/NeuraLNickCapture.jar`: script helper usado para capturar automaticamente o nick/char name da conta.
@@ -143,13 +149,15 @@ A aba `Contas` e o painel principal de operacao.
 
 Cada linha mostra:
 
-- Checkbox para habilitar ou desabilitar a conta.
-- Checkbox no cabecalho para habilitar ou desabilitar todas as contas de uma vez.
-- Barra de acoes em massa para aplicar script, ARG e world ou excluir contas selecionadas.
+- Checkbox para selecionar temporariamente a conta para acoes em massa.
+- Checkbox no cabecalho para selecionar todas as contas visiveis no filtro atual.
+- Barra de acoes em massa para aplicar categoria, script, ARG e world ou excluir contas selecionadas.
 - Email da conta.
-- Char name para consulta de stats.
+- Nick/char name capturado ou informado.
 - Notes.
 - Saude da conta.
+- Status do Checker.
+- TTL/total level quando disponivel no HiScores.
 - Categoria.
 - Script.
 - Schedule.
@@ -158,10 +166,9 @@ Cada linha mostra:
 - Proxy.
 - Botao de resumo/log.
 - Botao de lixeira para excluir a conta.
-- Botao `Salvar`.
 - Botao `Launch`.
 
-As configuracoes de notes, script, args, world, categoria e proxy ficam salvas por conta. Depois de editar uma linha, clique em `Salvar`.
+As configuracoes de notes, script, args, world, categoria e proxy ficam salvas por conta.
 
 Use `Notes` para identificar rapidamente o objetivo ou estado manual da conta, por exemplo `cozinhando`, `ranged 40-70`, `mule`, `teste proxy` ou `aguardando descanso`.
 
@@ -205,7 +212,11 @@ Na aba `Config`, `Debug Jagex login` registra respostas relevantes do browser de
 
 ### Lancar habilitadas
 
-O botao `Lancar habilitadas` percorre as contas marcadas como habilitadas.
+O botao `Lancar habilitadas` respeita a tela atual:
+
+- Se houver contas marcadas no checkbox, lanca somente as contas marcadas e visiveis.
+- Se nenhuma conta estiver marcada, lanca somente as contas habilitadas e visiveis no filtro atual.
+- Ao mudar busca, categoria, status, enabled, nick ou checker, a selecao temporaria e limpa para evitar launch de contas escondidas.
 
 Ele respeita:
 
@@ -215,6 +226,78 @@ Ele respeita:
 - Dados individuais de script, ARG, world e proxy.
 
 Durante a fila, o painel mostra uma barra com contador regressivo e quantos launches ainda faltam. Quando nao ha fila ativa, essa barra fica escondida para nao ocupar espaco.
+
+## Aba Checker
+
+A aba `Checker` serve para validar contas em lote.
+
+Ela usa duas fontes:
+
+- Nick/char name salvo na conta, quando ja existe.
+- Helper `NeuraL Nick Capture v2`, quando a conta ainda nao tem nick salvo.
+
+Fluxo de uma checagem:
+
+1. Se a conta ja tem nick salvo, o painel consulta o HiScores oficial.
+2. Se o nick existe no HiScores, a conta fica como `Encontrada`.
+3. Se o nick nao existe no HiScores, a conta fica como `Provavel banida`.
+4. Se a conta nao tem nick, o painel abre o DreamBot com o helper de captura.
+5. O helper tenta logar, capturar o nick e salvar em `data/farm.json`.
+6. Depois do nick capturado, o painel consulta o HiScores e fecha o client usado pelo checker.
+
+Status possiveis:
+
+- `Nao checada`: ainda nao passou pelo checker.
+- `Capturando nick`: helper aberto tentando obter o nick.
+- `Encontrada`: nick encontrado no HiScores.
+- `Provavel banida`: ban detectado no DreamBot ou nick ausente no HiScores.
+- `Erro`: falha de login, helper, automacao, timeout ou captura sem progresso.
+
+O Checker tambem mostra:
+
+- filtros por busca, categoria, status, enabled, nick e resultado do checker;
+- checkbox para selecionar todas as contas visiveis;
+- botao para checar todas as selecionadas;
+- botao vermelho `Encerrar checker`;
+- coluna TTL, puxada do HiScores;
+- botao de resumo com os stats da conta.
+
+### Fila do Checker
+
+Quando voce seleciona varias contas, o checker roda em fila.
+
+Comportamento:
+
+- inicia uma conta por vez;
+- espera a conta anterior ter resultado final;
+- se o resultado final apareceu, segue para a proxima mesmo que o client ainda esteja fechando;
+- tenta fechar o client usado pela checagem;
+- se ficar sem progresso por muito tempo, marca erro e segue a fila;
+- registra todas as etapas em `data/logs/checker.log`.
+
+### Log do Checker
+
+A aba Checker tem um console chamado `Log do checker`.
+
+Ele mostra eventos como:
+
+- fila iniciada;
+- conta atual;
+- helper iniciado;
+- aguardando conta anterior;
+- ban detectado;
+- nick capturado;
+- consulta ao HiScores;
+- stop do client;
+- erro ou timeout.
+
+O arquivo fisico fica em:
+
+```text
+data/logs/checker.log
+```
+
+Use esse log quando a fila parecer travada. Ele indica em qual conta e etapa o checker parou.
 
 ## Aba Proxy
 
@@ -336,12 +419,12 @@ Quando voce inicia o painel pelos arquivos `.bat`, esse helper e copiado automat
 Esse arquivo aparece no DreamBot como:
 
 ```text
-NeuraL Nick Capture
+NeuraL Nick Capture v2
 ```
 
 Fluxo esperado:
 
-1. Se a conta ainda nao tiver nick salvo, o painel abre primeiro o helper `NeuraL Nick Capture`.
+1. Se a conta ainda nao tiver nick salvo, o painel abre primeiro o helper `NeuraL Nick Capture v2`.
 2. O helper espera a conta entrar no jogo.
 3. Quando consegue ler o nome do personagem, ele grava uma linha de log com o nick.
 4. O painel salva esse nick no `data/farm.json`.

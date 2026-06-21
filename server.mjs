@@ -16,10 +16,11 @@ const configPath = join(dataDir, "farm.json");
 const accountsPath = join(dataDir, "accounts.txt");
 const statePath = join(dataDir, "web-farm-state.json");
 const logsDir = join(dataDir, "logs");
+const checkerLogPath = join(logsDir, "checker.log");
 const versionPath = join(rootDir, "VERSION");
 const dreamBotLogsDir = join(process.env.USERPROFILE || "", "DreamBot", "Logs");
 const dreamBotScriptsDir = join(process.env.USERPROFILE || "", "DreamBot", "Scripts");
-const nickCaptureScriptName = "NeuraL Nick Capture";
+const nickCaptureScriptName = "NeuraL Nick Capture v2";
 const nickCaptureJarPath = join(dreamBotScriptsDir, "NeuraLNickCapture.jar");
 const projectNickCaptureJarPath = join(rootDir, "tools", "nick-capture-helper", "dist", "NeuraLNickCapture.jar");
 const port = Number(process.env.PORT || 3000);
@@ -30,6 +31,7 @@ const javaProcessCache = { at: 0, value: [], promise: null };
 const windowTitleCache = { at: 0, value: new Map(), promise: null };
 const jcefDiagnosticsCache = { at: 0, value: null, promise: null };
 const machineDiagnosticsCache = { at: 0, value: null, promise: null };
+let appStateWriteQueue = Promise.resolve();
 
 const contentTypes = {
   ".html": "text/html; charset=utf-8",
@@ -177,6 +179,7 @@ async function readConfig() {
   if (!existsSync(configPath)) {
     return {
       launcherPath: "C:\\Users\\gusta\\DreamBot\\Launcher.jar",
+      tribotCliPath: "",
       accountsFile: ".\\data\\accounts.txt",
       defaultScriptName: "Teste",
       defaultWorld: 301,
@@ -215,19 +218,49 @@ async function readState() {
   return state.launches;
 }
 
+function defaultAppState() {
+  return { launches: [], continuous: defaultContinuousState(), hiscores: {}, checker: {}, discordNotifications: {} };
+}
+
+function normalizeCheckerState(checker) {
+  if (!checker || typeof checker !== "object") return {};
+  return Object.fromEntries(Object.entries(checker).map(([key, value]) => {
+    if (!value || typeof value !== "object") return [key, value];
+    return [
+      key,
+      {
+        ...value,
+        message: String(value.message || "").replace(/\b[Dd]etectido\b/g, (match) =>
+          match[0] === "D" ? "Detectado" : "detectado"
+        ),
+      },
+    ];
+  }));
+}
+
 async function readAppState() {
-  if (!existsSync(statePath)) return { launches: [], continuous: defaultContinuousState(), hiscores: {}, discordNotifications: {} };
+  if (!existsSync(statePath)) return defaultAppState();
   const raw = stripBom(await readFile(statePath, "utf8"));
-  if (!raw.trim()) return { launches: [], continuous: defaultContinuousState(), hiscores: {}, discordNotifications: {} };
-  const parsed = JSON.parse(raw);
+  if (!raw.trim()) return defaultAppState();
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    const repaired = parseFirstJsonValue(raw);
+    if (!repaired) throw error;
+    parsed = repaired;
+    await writeTextFileSafely(`${statePath}.corrupt-${Date.now()}.bak`, raw);
+    await writeAppState(parsed);
+  }
   if (Array.isArray(parsed)) {
-    return { launches: parsed, continuous: defaultContinuousState(), hiscores: {}, discordNotifications: {} };
+    return { ...defaultAppState(), launches: parsed };
   }
 
   return {
     launches: Array.isArray(parsed.launches) ? parsed.launches : [],
     continuous: normalizeContinuousState(parsed.continuous),
     hiscores: parsed.hiscores && typeof parsed.hiscores === "object" ? parsed.hiscores : {},
+    checker: normalizeCheckerState(parsed.checker),
     discordNotifications: parsed.discordNotifications && typeof parsed.discordNotifications === "object" ? parsed.discordNotifications : {},
   };
 }
@@ -243,12 +276,17 @@ async function writeState(rows) {
 }
 
 async function writeAppState(state) {
-  await writeTextFileSafely(statePath, `${JSON.stringify({
+  const payload = `${JSON.stringify({
     launches: Array.isArray(state.launches) ? state.launches : [],
     continuous: normalizeContinuousState(state.continuous),
     hiscores: state.hiscores && typeof state.hiscores === "object" ? state.hiscores : {},
+    checker: normalizeCheckerState(state.checker),
     discordNotifications: trimNotificationState(state.discordNotifications),
-  }, null, 2)}\n`);
+  }, null, 2)}\n`;
+  appStateWriteQueue = appStateWriteQueue
+    .catch(() => {})
+    .then(() => writeTextFileSafely(statePath, payload));
+  await appStateWriteQueue;
 }
 
 function trimNotificationState(value) {
@@ -284,7 +322,7 @@ function normalizeContinuousState(value = {}) {
 }
 
 async function writeTextFileSafely(filePath, content) {
-  const tempPath = `${filePath}.${process.pid}.tmp`;
+  const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
   const backupPath = `${filePath}.bak`;
 
   if (existsSync(filePath)) {
@@ -297,6 +335,48 @@ async function writeTextFileSafely(filePath, content) {
 
   await writeFile(tempPath, content, "utf8");
   await rename(tempPath, filePath);
+}
+
+function parseFirstJsonValue(raw) {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let started = false;
+  for (let index = 0; index < raw.length; index += 1) {
+    const char = raw[index];
+    if (!started) {
+      if (/\s/.test(char)) continue;
+      if (char !== "{" && char !== "[") return null;
+      started = true;
+    }
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === "\"") {
+      inString = true;
+    } else if (char === "{" || char === "[") {
+      depth += 1;
+    } else if (char === "}" || char === "]") {
+      depth -= 1;
+      if (started && depth === 0) {
+        try {
+          return JSON.parse(raw.slice(0, index + 1));
+        } catch {
+          return null;
+        }
+      }
+    }
+  }
+  return null;
 }
 
 function base32ToBuffer(value) {
@@ -366,6 +446,7 @@ function normalizeConfigAccounts(config, accounts) {
       enabled: item.enabled !== false,
       email: account.email ?? "",
       accountNickname: String(item.accountNickname || "").trim(),
+      botClient: normalizeBotClient(item.botClient),
       jagexSessionId: String(item.jagexSessionId || "").trim(),
       jagexCharacterId: String(item.jagexCharacterId || "").trim(),
       jagexDisplayName: String(item.jagexDisplayName || "").trim(),
@@ -431,6 +512,7 @@ function normalizeTask(task, config = {}) {
   const maxInstances = Number(task.maxInstances || 1);
   const launchDelaySeconds = Number(task.launchDelaySeconds ?? config.launchDelaySeconds ?? 0);
   const cooldownMinutes = Number(task.cooldownMinutes || 0);
+  const completionLevel = Number(task.completionLevel || 0);
   const scheduleName = String(task.scheduleName || "").trim();
   return {
     id,
@@ -443,6 +525,9 @@ function normalizeTask(task, config = {}) {
     worldMode: normalizeWorldMode(task.worldMode),
     proxyMode: normalizeProxyMode(task.proxyMode),
     proxyId: normalizeProxyId(task.proxyId),
+    completionSkill: normalizeCompletionSkill(task.completionSkill),
+    completionLevel: Number.isFinite(completionLevel) && completionLevel > 0 ? Math.floor(completionLevel) : 0,
+    moveToCategoryOnComplete: String(task.moveToCategoryOnComplete || "").trim(),
     maxInstances: Number.isFinite(maxInstances) && maxInstances > 0 ? Math.floor(maxInstances) : 1,
     launchDelaySeconds: Number.isFinite(launchDelaySeconds) && launchDelaySeconds > 0 ? Math.floor(launchDelaySeconds) : 0,
     cooldownMinutes: Number.isFinite(cooldownMinutes) && cooldownMinutes > 0 ? Math.floor(cooldownMinutes) : 0,
@@ -475,6 +560,22 @@ function normalizeDiscordWebhookConfig(config) {
     notifyOnStop: value.notifyOnStop !== false,
     includeLogTail: value.includeLogTail !== false,
   };
+}
+
+function normalizeBotClient(value) {
+  const clean = String(value || "").trim().toLowerCase();
+  return clean === "tribot" ? "tribot" : "dreambot";
+}
+
+function resolveTribotCliPath(config = {}) {
+  const candidates = [
+    String(config.tribotCliPath || "").trim(),
+    process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, "Tribot", "tribot-x.exe") : "",
+    process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, "org.tribot.x", "tribot-x.exe") : "",
+    process.env.ProgramFiles ? join(process.env.ProgramFiles, "Tribot", "tribot-x.exe") : "",
+  ].filter(Boolean);
+
+  return candidates.find((candidate) => existsSync(candidate)) || "";
 }
 
 function buildTaskRow(row, task) {
@@ -510,6 +611,7 @@ function normalizeLaunchOverride(body, config) {
     body.jagexRefreshToken === undefined &&
     body.notes === undefined &&
     body.charName === undefined &&
+    body.botClient === undefined &&
     body.enabled === undefined
   ) {
     return null;
@@ -524,6 +626,7 @@ function normalizeLaunchOverride(body, config) {
     world: Number(body.world || config.defaultWorld || 301),
     worldMode: normalizeWorldMode(body.worldMode),
     proxyId: normalizeProxyId(body.proxyId),
+    botClient: normalizeBotClient(body.botClient),
     accountNickname: String(body.accountNickname || "").trim(),
     jagexSessionId: String(body.jagexSessionId || "").trim(),
     jagexCharacterId: String(body.jagexCharacterId || "").trim(),
@@ -540,7 +643,7 @@ function usesBrowserLogin(row, config) {
   return config.useJagexBrowserLogin !== false && !hasJagexSession;
 }
 
-function buildArgs({ account, row, config, remoteDebuggingPort = 0 }) {
+function buildDreamBotArgs({ account, row, config, remoteDebuggingPort = 0 }) {
   const totp = config.useGeneratedTotp ? getTotpCode(account.totpSecret) : account.totpSecret;
   const proxies = normalizeProxies(config);
   const proxy = proxies.find((item) => item.enabled && item.id === normalizeProxyId(row.proxyId));
@@ -607,14 +710,58 @@ function buildArgs({ account, row, config, remoteDebuggingPort = 0 }) {
   return args;
 }
 
+function buildTribotArgs({ account, row, config }) {
+  const totp = config.useGeneratedTotp ? getTotpCode(account.totpSecret) : account.totpSecret;
+  const proxies = normalizeProxies(config);
+  const proxy = proxies.find((item) => item.enabled && item.id === normalizeProxyId(row.proxyId));
+  const args = ["run"];
+  const charName = String(row.charName || row.jagexDisplayName || "").trim();
+
+  if (charName) {
+    args.push("--jagex-character-name", charName);
+  } else {
+    args.push(
+      "--legacy-username",
+      account.email,
+      "--legacy-password-raw",
+      account.password,
+      "--legacy-totp-raw",
+      totp,
+    );
+  }
+
+  if (proxy) {
+    args.push("--proxy-host-raw", proxy.host, "--proxy-port-raw", String(proxy.port));
+    if (proxy.username) args.push("--proxy-username-raw", proxy.username);
+    if (proxy.password) args.push("--proxy-password-raw", proxy.password);
+  }
+
+  if (row.scriptName || config.defaultScriptName) args.push("--script-name", row.scriptName || config.defaultScriptName);
+  if (Array.isArray(row.scriptParams) && row.scriptParams.length) args.push("--script-args", row.scriptParams.join(","));
+  if (String(row.worldMode || "fixed") === "fixed" && Number(row.world || config.defaultWorld || 0)) {
+    args.push("--world", String(row.world || config.defaultWorld));
+  }
+
+  return args;
+}
+
+function buildArgs({ account, row, config, remoteDebuggingPort = 0 }) {
+  return normalizeBotClient(row.botClient) === "tribot"
+    ? buildTribotArgs({ account, row, config })
+    : buildDreamBotArgs({ account, row, config, remoteDebuggingPort });
+}
+
 function buildSafeArgs({ account, row, config, remoteDebuggingPort = 0 }) {
   const args = buildArgs({ account, row, config, remoteDebuggingPort });
   const sensitive = new Set([
     "-accountPassword",
     "-accountPass",
     "-accountTotp",
+    "--legacy-password-raw",
+    "--legacy-totp-raw",
     "-proxyPass",
     "-proxyPassArg",
+    "--proxy-password-raw",
     "-sessionId",
     "-accessToken",
     "-refreshToken",
@@ -662,6 +809,13 @@ const osrsSkillNames = [
   "hunter",
   "construction",
 ];
+
+function normalizeCompletionSkill(value) {
+  const clean = String(value || "").trim().toLowerCase().replace(/\s+/g, "_");
+  if (clean === "total" || clean === "total_level") return "overall";
+  if (clean === "combat" || clean === "combat_level") return "combat";
+  return osrsSkillNames.includes(clean) ? clean : "";
+}
 
 function normalizePlayerName(value) {
   return String(value || "").trim().replace(/\s+/g, " ");
@@ -728,7 +882,11 @@ async function getHiscores(body) {
       "User-Agent": "NeuraL-Farm-Control/1.0",
     },
   });
-  if (response.status === 404) throw new Error(`Char "${player}" não encontrado no HiScores.`);
+  if (response.status === 404) {
+    const error = new Error(`Char "${player}" não encontrado no HiScores.`);
+    error.code = "HISCORES_NOT_FOUND";
+    throw error;
+  }
   if (!response.ok) throw new Error(`HiScores respondeu HTTP ${response.status}.`);
 
   const parsed = parseHiscoreLite(player, await response.text());
@@ -745,9 +903,57 @@ function extractCharNameFromText(text) {
   return match ? normalizePlayerName(match[1]) : "";
 }
 
+function extractBanStatusFromText(text) {
+  const raw = String(text || "");
+  if (/Account is being set to banned status/i.test(raw)) {
+    return "Account is being set to banned status";
+  }
+  if (/your account has been involved in serious rule breaking/i.test(raw)) {
+    return "Serious rule breaking";
+  }
+  if (/High severity server response,\s*stopping script!\s*Response:\s*(?:DISABLED|BANNED)/i.test(raw)) {
+    return "High severity server response";
+  }
+  if (/\baccount\b.*\b(?:banned|disabled|locked)\b/i.test(raw)) {
+    return "Account banned/disabled";
+  }
+  return "";
+}
+
+function extractNickCaptureRuntimeError(text) {
+  const raw = String(text || "");
+  if (/script (?:was )?(?:built|compiled) using (?:a )?newer java/i.test(raw)) {
+    return "NeuraL Nick Capture foi compilado para Java mais novo que o client DreamBot.";
+  }
+  if (/compiled using a newer version of Java|newer version of Java than what you're running/i.test(raw)) {
+    return "NeuraL Nick Capture incompatível com o Java do client DreamBot.";
+  }
+  return "";
+}
+
+function extractNickCaptureBlockedReason(text) {
+  const raw = String(text || "");
+  if (/Before using this app,\s*please read and accept/i.test(raw) || /\bAccept\b[\s\S]{0,120}\bDecline\b/i.test(raw)) {
+    return "DreamBot aguardando aceite do EULA.";
+  }
+  return "";
+}
+
 async function ensureNickCaptureJarInstalled() {
-  if (existsSync(nickCaptureJarPath)) return true;
   if (!existsSync(projectNickCaptureJarPath)) return false;
+  let shouldCopy = !existsSync(nickCaptureJarPath);
+  if (!shouldCopy) {
+    try {
+      const [sourceInfo, targetInfo] = await Promise.all([
+        stat(projectNickCaptureJarPath),
+        stat(nickCaptureJarPath),
+      ]);
+      shouldCopy = sourceInfo.size !== targetInfo.size || sourceInfo.mtimeMs > targetInfo.mtimeMs + 1000;
+    } catch {
+      shouldCopy = true;
+    }
+  }
+  if (!shouldCopy) return true;
   await mkdir(dreamBotScriptsDir, { recursive: true });
   await copyFile(projectNickCaptureJarPath, nickCaptureJarPath);
   return existsSync(nickCaptureJarPath);
@@ -867,11 +1073,18 @@ async function waitForCapturedCharName({ index, account, startedAt, stdoutPath, 
   while (Date.now() < deadline) {
     const stdout = await readTextTail(stdoutPath, 8000);
     let charName = extractCharNameFromText(stdout);
+    let banReason = extractBanStatusFromText(stdout);
 
     if (!charName) {
       const dreamBotLogPath = await findLatestDreamBotLog(account.email, startedMs - 5000);
       const dreamBotLog = dreamBotLogPath ? await readTextTail(dreamBotLogPath, 12000) : "";
       charName = extractCharNameFromText(dreamBotLog);
+      if (!banReason) banReason = extractBanStatusFromText(dreamBotLog);
+    }
+
+    if (banReason) {
+      await appendLaunchLog(stdoutPath, `ban detectado durante captura de nick: ${banReason}.`);
+      return "";
     }
 
     if (isLikelyRunescapeName(charName)) {
@@ -992,6 +1205,7 @@ async function discoverCharNamesFromLogs(config, rows, launches) {
 function sanitizeConfig(config) {
   return {
     launcherPath: config.launcherPath,
+    tribotCliPath: config.tribotCliPath || resolveTribotCliPath(config),
     defaultScriptName: config.defaultScriptName,
     defaultWorld: config.defaultWorld,
     useGeneratedTotp: Boolean(config.useGeneratedTotp),
@@ -1080,12 +1294,36 @@ async function getSnapshot() {
   const proxies = normalizeProxies(config);
   const tasks = normalizeTasks(config);
   const appState = await readAppState();
+  const previousLaunchesJson = JSON.stringify(appState.launches || []);
+  const previousCheckerJson = JSON.stringify(appState.checker || {});
+  const previousNotificationsJson = JSON.stringify(appState.discordNotifications || {});
   const javaProcesses = await getJavaProcesses();
   const performance = await getPerformanceDiagnostics();
   const alive = await reconcileLaunches(appState.launches, javaProcesses);
-  await processLaunchNotifications({ config, appState, rows, reconciled: alive });
+  await processLaunchNotifications({ config, appState, rows, tasks, reconciled: alive });
+  for (const launch of alive) {
+    if (!launch.banReason) continue;
+    const index = Number(launch.index);
+    if (!Number.isInteger(index)) continue;
+    const previous = appState.checker?.[index];
+    const checkedAt = launch.banDetectedAt || launch.completedAt || previous?.checkedAt || new Date().toISOString();
+    appState.checker = {
+      ...(appState.checker || {}),
+      [index]: {
+        index,
+        checkedAt,
+        status: "banned",
+        message: `Ban detectado no DreamBot: ${launch.banReason}.`,
+        charName: "",
+      },
+    };
+  }
   appState.launches = alive;
-  await writeAppState(appState);
+  const stateChanged =
+    previousLaunchesJson !== JSON.stringify(appState.launches || []) ||
+    previousCheckerJson !== JSON.stringify(appState.checker || {}) ||
+    previousNotificationsJson !== JSON.stringify(appState.discordNotifications || {});
+  if (stateChanged) await writeAppState(appState);
   const rowsWithCharNames = await discoverCharNamesFromLogs(config, rows, alive);
   const visibleLaunches = compactLaunchesForRows(alive, rowsWithCharNames);
 
@@ -1111,6 +1349,7 @@ async function getSnapshot() {
     launches: visibleLaunches,
     categories: normalizeCategories(config, rows, tasks),
     continuousTasks: tasks,
+    checker: appState.checker && typeof appState.checker === "object" ? appState.checker : {},
     diagnostics: buildDiagnostics({ config, accounts, rows, proxies, tasks }),
     performance,
     continuous: {
@@ -1576,13 +1815,29 @@ async function reconcileLaunches(launches, javaProcesses = []) {
 
     if (client) usedClientPids.add(client.pid);
     const isFreshLaunch = Date.now() - launchTime < 5 * 60 * 1000;
-    const status = client ? "Running" : directRunning && isFreshLaunch ? "Starting" : "StoppedOrUnknown";
+    let status = client ? "Running" : directRunning && isFreshLaunch ? "Starting" : "StoppedOrUnknown";
     const stdout = await readTextTail(launch.stdout, 2500);
     const dreamBotLogPath = await findLatestDreamBotLog(launch.email, launchTime - 5000);
-    const dreamBotLog = dreamBotLogPath ? await readTextTail(dreamBotLogPath, 5000) : "";
-    const completionReason = launch.completionReason || extractRoutineCompletion(`${stdout}\n${dreamBotLog}`, launch);
+    const dreamBotLog = dreamBotLogPath ? await readTextTail(dreamBotLogPath, 12000) : "";
+    const banReason = extractBanStatusFromText(`${stdout}\n${dreamBotLog}`);
+    const completionReason = banReason
+      ? `Conta banida: ${banReason}`
+      : launch.completionReason || extractRoutineCompletion(`${stdout}\n${dreamBotLog}`, launch);
     const routineCompleted = Boolean(launch.routineCompleted || completionReason);
     const effectivePid = client?.pid || launch.pid;
+    const completedAt = routineCompleted ? launch.completedAt || new Date().toISOString() : "";
+
+    if (banReason && isLaunchActive({ status })) {
+      for (const pid of [...new Set([client?.pid, launch.clientPid, launch.pid].map(Number).filter((pid) => Number.isInteger(pid) && pid > 0))]) {
+        try {
+          await stopProcess(pid);
+        } catch {
+          // The client may already have exited after DreamBot stopped the script.
+        }
+      }
+      status = "StoppedOrUnknown";
+    }
+
     reconciledByPid.set(launch.pid, {
       ...launch,
       clientPid: client?.pid || launch.clientPid || 0,
@@ -1591,7 +1846,9 @@ async function reconcileLaunches(launches, javaProcesses = []) {
       stage: completionReason || latestStageFromText(stdout, status),
       routineCompleted,
       completionReason,
-      completedAt: routineCompleted ? launch.completedAt || new Date().toISOString() : "",
+      banReason,
+      banDetectedAt: banReason ? launch.banDetectedAt || completedAt || new Date().toISOString() : "",
+      completedAt,
     });
   }
 
@@ -1699,9 +1956,84 @@ async function notifyLaunchStopped({ config, rows, launch }) {
   });
 }
 
-async function processLaunchNotifications({ config, appState, rows, reconciled }) {
+function hiscoreGoalValue(stats, skill) {
+  if (skill === "combat") return Number(stats.combatLevel || 0);
+  if (skill === "overall") return Number(stats.totalLevel || stats.skills?.overall?.level || 0);
+  return Number(stats.skills?.[skill]?.level || 0);
+}
+
+async function moveAccountToCategory(index, category) {
+  const target = normalizeCategory(category);
+  if (!target) return false;
+  const config = await readConfig();
+  if (!Array.isArray(config.accounts)) config.accounts = [];
+  config.categories = normalizeCategories(config).includes(target)
+    ? normalizeCategories(config)
+    : normalizeCategories({ ...config, categories: [...config.categories, target] });
+
+  let changed = false;
+  config.accounts = config.accounts.map((row) => {
+    if (Number(row.index) !== Number(index)) return row;
+    if (normalizeCategory(row.category) === target) return row;
+    changed = true;
+    return { ...row, category: target };
+  });
+
+  if (changed) await writeConfig(config);
+  return changed;
+}
+
+async function closeCompletedLaunchClient(launch) {
+  const pid = Number(launch.effectivePid || launch.clientPid || launch.pid || 0);
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return { stopped: false, pid: 0, error: "pid invalido" };
+  }
+  try {
+    await stopProcess(pid);
+    return { stopped: true, pid, error: "" };
+  } catch (error) {
+    return { stopped: false, pid, error: error.message || String(error) };
+  }
+}
+
+async function runTaskCompletionAction({ launch, rows, tasks }) {
+  const task = tasks.find((item) => item.id && item.id === launch.taskId);
+  if (!task) return { pending: false, detail: "" };
+
+  const row = rows.find((item) => Number(item.index) === Number(launch.index));
+  const skill = normalizeCompletionSkill(task.completionSkill);
+  const targetLevel = Number(task.completionLevel || 0);
+
+  if (skill && targetLevel > 0) {
+    if (!row?.charName) {
+      return { pending: true, detail: "sem nick salvo para consultar HiScores" };
+    }
+    const stats = await getHiscores({ player: row.charName, refresh: false });
+    const currentLevel = hiscoreGoalValue(stats, skill);
+    if (currentLevel < targetLevel) {
+      return { pending: true, detail: `${skill} ${currentLevel}/${targetLevel}` };
+    }
+  }
+
+  if (task.moveToCategoryOnComplete) {
+    const moved = await moveAccountToCategory(launch.index, task.moveToCategoryOnComplete);
+    const closeResult = await closeCompletedLaunchClient(launch);
+    return {
+      pending: false,
+      detail: moved
+        ? `movida para ${task.moveToCategoryOnComplete}; client ${closeResult.stopped ? `fechado pid ${closeResult.pid}` : `nao fechado: ${closeResult.error}`}`
+        : `ja estava em ${task.moveToCategoryOnComplete}; client ${closeResult.stopped ? `fechado pid ${closeResult.pid}` : `nao fechado: ${closeResult.error}`}`,
+      movedCategory: task.moveToCategoryOnComplete,
+      stoppedPid: closeResult.stopped ? closeResult.pid : 0,
+      stopError: closeResult.error || "",
+    };
+  }
+
+  return { pending: false, detail: "" };
+}
+
+async function processLaunchNotifications({ config, appState, rows, tasks = [], reconciled }) {
   const webhook = normalizeDiscordWebhookConfig(config);
-  if (!webhook.enabled || !webhook.url) return false;
 
   const previousByPid = new Map((appState.launches || []).map((launch) => [Number(launch.pid), launch]));
   const notifications = appState.discordNotifications && typeof appState.discordNotifications === "object"
@@ -1713,10 +2045,13 @@ async function processLaunchNotifications({ config, appState, rows, reconciled }
     if (launch.scriptName === nickCaptureScriptName) continue;
     const previous = previousByPid.get(Number(launch.pid));
     const completionKey = launchNotificationKey(launch, "completed");
-    const wasCompleted = Boolean(previous?.routineCompleted);
-    if (launch.routineCompleted && !wasCompleted && !notifications[completionKey]) {
+    if (launch.routineCompleted && !notifications[completionKey]) {
       try {
-        await notifyLaunchStopped({ config, rows, launch });
+        const action = await runTaskCompletionAction({ launch, rows, tasks });
+        if (action.pending) continue;
+        if (webhook.enabled && webhook.url && webhook.notifyOnStop) {
+          await notifyLaunchStopped({ config, rows, launch });
+        }
         notifications[completionKey] = {
           at: new Date().toISOString(),
           email: launch.email,
@@ -1724,6 +2059,10 @@ async function processLaunchNotifications({ config, appState, rows, reconciled }
           pid: launch.pid,
           type: "completed",
           reason: launch.completionReason || "",
+          action: action.detail || "",
+          movedCategory: action.movedCategory || "",
+          stoppedPid: action.stoppedPid || 0,
+          stopError: action.stopError || "",
         };
         changed = true;
       } catch (error) {
@@ -1744,7 +2083,9 @@ async function processLaunchNotifications({ config, appState, rows, reconciled }
       if (notifications[completionKey]) continue;
       if (notifications[key]) continue;
       try {
-        await notifyLaunchStopped({ config, rows, launch });
+        if (webhook.enabled && webhook.url && webhook.notifyOnStop) {
+          await notifyLaunchStopped({ config, rows, launch });
+        }
         notifications[key] = {
           at: new Date().toISOString(),
           email: launch.email,
@@ -1782,8 +2123,14 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function findAvailablePort(startPort) {
-  for (let portToTry = startPort; portToTry < startPort + 50; portToTry += 1) {
+async function findAvailablePort(startPort, { minPort = 51000, maxPort = 65535, attempts = 500 } = {}) {
+  const min = Math.max(0, Math.floor(Number(minPort) || 0));
+  const max = Math.min(65535, Math.floor(Number(maxPort) || 65535));
+  const span = Math.max(1, max - min + 1);
+  const normalizedStart = min + ((((Math.floor(Number(startPort) || min) - min) % span) + span) % span);
+
+  for (let offset = 0; offset < Math.min(attempts, span); offset += 1) {
+    const portToTry = min + (((normalizedStart - min) + offset) % span);
     const available = await new Promise((resolveAvailable) => {
       const server = createTcpServer();
       server.once("error", () => resolveAvailable(false));
@@ -1799,6 +2146,34 @@ async function findAvailablePort(startPort) {
 async function appendLaunchLog(filePath, message) {
   if (!filePath) return;
   await appendFile(filePath, `\n[NeuraL Jagex Login] ${new Date().toLocaleTimeString()} ${message}\n`);
+}
+
+async function appendCheckerLog(message, details = {}) {
+  await mkdir(logsDir, { recursive: true });
+  const extra = Object.entries(details)
+    .filter(([, value]) => value !== undefined && value !== null && value !== "")
+    .map(([key, value]) => `${key}=${String(value).replace(/\s+/g, " ")}`)
+    .join(" ");
+  await appendFile(checkerLogPath, `[${new Date().toLocaleString()}] ${message}${extra ? ` · ${extra}` : ""}\n`);
+}
+
+async function getCheckerLog() {
+  return {
+    path: checkerLogPath,
+    text: await readTextTail(checkerLogPath, 30000),
+  };
+}
+
+async function clearCheckerLog() {
+  await mkdir(logsDir, { recursive: true });
+  await writeFile(checkerLogPath, "");
+  await appendCheckerLog("Log do checker limpo");
+  return getCheckerLog();
+}
+
+async function addCheckerLog(body = {}) {
+  await appendCheckerLog(String(body.message || "Evento do checker"), body.details || {});
+  return getCheckerLog();
 }
 
 async function appendJagexDebugLog(message) {
@@ -1973,15 +2348,39 @@ function visibleInputExpression(selector) {
   })()`;
 }
 
+function fillVisibleInputExpression(selector, value) {
+  return `(() => {
+    const input = [...document.querySelectorAll(${JSON.stringify(selector)})]
+      .find((el) => {
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0 && !el.disabled && !el.readOnly;
+      });
+    if (!input) return false;
+    const value = ${JSON.stringify(value)};
+    input.focus();
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+    if (setter) setter.call(input, "");
+    else input.value = "";
+    input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward", data: null }));
+    if (setter) setter.call(input, value);
+    else input.value = value;
+    input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: value.slice(-1) || "0" }));
+    return input.value === value;
+  })()`;
+}
+
 async function typeIntoFocusedField(client, selector, value) {
   const focused = await waitForExpression(client, visibleInputExpression(selector), 30000);
   if (!focused) throw new Error(`Campo nao encontrado no login Jagex: ${selector}`);
-  await client.send("Input.insertText", { text: value });
+  const filled = await cdpEval(client, fillVisibleInputExpression(selector, value));
+  if (!filled) await client.send("Input.insertText", { text: value });
   await sleep(500);
 }
 
 async function clickJagexContinue(client) {
-  await cdpEval(client, `(() => {
+  const clicked = await waitForExpression(client, `(() => {
     const candidates = [...document.querySelectorAll("button,input[type=submit]")];
     const button = candidates.find((el) => {
       const rect = el.getBoundingClientRect();
@@ -1991,13 +2390,120 @@ async function clickJagexContinue(client) {
     if (!button) return false;
     button.click();
     return true;
-  })()`);
+  })()`, 10000);
+  if (!clicked) {
+    await cdpEval(client, `(() => {
+      const form = document.querySelector("form");
+      if (!form) return false;
+      if (typeof form.requestSubmit === "function") form.requestSubmit();
+      else form.submit();
+      return true;
+    })()`);
+  }
   await sleep(1500);
+}
+
+async function clickJagexCookiePromptIfPresent(client, timeoutMs = 7000) {
+  const started = Date.now();
+  let lastResult = { clicked: false, reason: "not-present" };
+  while (Date.now() - started < timeoutMs) {
+    const result = await cdpEval(client, `(() => {
+      const text = String(document.body?.innerText || "").replace(/\\s+/g, " ").trim();
+      const looksLikeCookiePrompt = /Your Privacy|cookies|Cookie Policy|Manage Preferences/i.test(text);
+      if (!looksLikeCookiePrompt) return { clicked: false, reason: "not-present" };
+
+      const candidates = [...document.querySelectorAll("button,input[type=button],input[type=submit],a,[role=button]")];
+      const buttons = candidates
+        .map((el) => {
+          const rect = el.getBoundingClientRect();
+          const label = (el.innerText || el.value || el.getAttribute("aria-label") || el.textContent || "").replace(/\\s+/g, " ").trim();
+          return { el, rect, label };
+        })
+        .filter(({ rect, label }) => rect.width > 0 && rect.height > 0 && label);
+
+      const preferred = buttons.find(({ label }) => /use necessary cookies only|necessary cookies/i.test(label))
+        || buttons.find(({ label }) => /allow all cookies|accept all cookies|accept all/i.test(label))
+        || buttons.find(({ label }) => /continue|accept|allow/i.test(label));
+
+      if (!preferred) return { clicked: false, reason: "button-not-found", text: text.slice(0, 180) };
+      preferred.el.click();
+      return { clicked: true, label: preferred.label };
+    })()`);
+
+    lastResult = result || lastResult;
+    if (result?.clicked) {
+      await sleep(1200);
+      return result;
+    }
+    await sleep(500);
+  }
+
+  return lastResult;
+}
+
+async function fillJagexTotpAndContinue(client, code) {
+  const selector = [
+    "#totp-verify-form--input-code",
+    'input[name="code"]',
+    'input[inputmode="numeric"]',
+    'input[autocomplete="one-time-code"]',
+    'input[type="tel"]',
+    'input[id*="code" i]',
+    'input[aria-label*="code" i]',
+    'input[type="text"]',
+    "input:not([type])",
+  ].join(", ");
+  await typeIntoFocusedField(client, selector, code);
+  await clickJagexContinue(client);
+}
+
+async function clickJagexConsentIfPresent(client) {
+  const started = Date.now();
+  while (Date.now() - started < 25000) {
+    const result = await cdpEval(client, `(() => {
+      const url = String(location.href || "");
+      const text = String(document.body?.innerText || "").replace(/\\s+/g, " ").trim();
+      const onConsent = /\\/consent\\b|consent_challenge|authorize|permissions|access/i.test(url + " " + text);
+      const candidates = [...document.querySelectorAll("button,input[type=submit],a,[role=button]")];
+      const match = candidates
+        .map((el) => {
+          const rect = el.getBoundingClientRect();
+          const label = (el.innerText || el.value || el.getAttribute("aria-label") || "").replace(/\\s+/g, " ").trim();
+          return { el, rect, label };
+        })
+        .filter(({ rect, label }) =>
+          rect.width > 0 &&
+          rect.height > 0 &&
+          !/decline|deny|cancel|back|logout|log out/i.test(label) &&
+          /accept|agree|allow|authorize|continue|confirm|yes|play|launch/i.test(label)
+        )
+        .sort((a, b) => (b.rect.width * b.rect.height) - (a.rect.width * a.rect.height))[0];
+      if (match && (onConsent || /accept|allow|authorize|continue/i.test(match.label))) {
+        match.el.click();
+        return { clicked: true, label: match.label, url };
+      }
+      if (/secure\\.runescape\\.com|launcher-redirect|code=/.test(url)) {
+        return { done: true, url };
+      }
+      return { clicked: false, done: false, url, text: text.slice(0, 120) };
+    })()`);
+
+    if (result?.done) return result;
+    if (result?.clicked) {
+      await sleep(2500);
+      return result;
+    }
+    await sleep(1000);
+  }
+  return { clicked: false, done: false, timeout: true };
 }
 
 async function clickAuthenticatorOption(client) {
   const started = Date.now();
   while (Date.now() - started < 30000) {
+    const alreadyOnTotp = await cdpEval(client, `Boolean(document.querySelector("#totp-verify-form--input-code, input[name='code'], input[inputmode='numeric']"))`);
+    if (alreadyOnTotp) return "already-on-totp";
+
     const point = await cdpEval(client, `(() => {
       const elements = [...document.querySelectorAll("button,a,div,li,label,[role=button]")];
       const matches = elements
@@ -2046,7 +2552,10 @@ async function attachJagexDebugMonitor(client, { account, index }) {
         const url = response.url || "";
         if (!interesting.test(url)) return;
         const mime = response.mimeType || "";
-        if (!/json|text|javascript/i.test(mime)) return;
+        if (!/json/i.test(mime)) {
+          await appendJagexDebugLog(`response status=${response.status} mime=${mime} url=${url}`);
+          return;
+        }
         requestIds.set(payload.params.requestId, { url, status: response.status, mime });
         await appendJagexDebugLog(`response status=${response.status} mime=${mime} url=${url}`);
       }
@@ -2102,27 +2611,49 @@ async function automateJagexLogin({ account, index, config, portToUse, stdoutPat
       await client.send("Runtime.enable");
       await client.send("Page.enable");
       const stopDebugMonitor = config.jagexDebug ? await attachJagexDebugMonitor(client, { account, index }) : null;
+      const firstCookieResult = await clickJagexCookiePromptIfPresent(client, 7000);
+      if (firstCookieResult.clicked) {
+        await appendLaunchLog(stdoutPath, `cookies Jagex acionado: ${firstCookieResult.label || "botao"}.`);
+      }
       await appendLaunchLog(stdoutPath, "preenchendo email.");
       await typeIntoFocusedField(client, 'input[type="email"], input[name*="email" i], input[autocomplete="email"], input[id*="email" i]', account.email);
       await clickJagexContinue(client);
+      const emailCookieResult = await clickJagexCookiePromptIfPresent(client, 2500);
+      if (emailCookieResult.clicked) {
+        await appendLaunchLog(stdoutPath, `cookies Jagex acionado: ${emailCookieResult.label || "botao"}.`);
+      }
 
       await appendLaunchLog(stdoutPath, "preenchendo senha.");
       await typeIntoFocusedField(client, 'input[type="password"], input[name*="password" i], input[autocomplete*="password" i]', account.password);
       await clickJagexContinue(client);
+      const passwordCookieResult = await clickJagexCookiePromptIfPresent(client, 2500);
+      if (passwordCookieResult.clicked) {
+        await appendLaunchLog(stdoutPath, `cookies Jagex acionado: ${passwordCookieResult.label || "botao"}.`);
+      }
 
       await appendLaunchLog(stdoutPath, "selecionando app autenticador.");
-      await clickAuthenticatorOption(client);
+      const authenticatorStep = await clickAuthenticatorOption(client);
+      if (authenticatorStep === "already-on-totp") {
+        await appendLaunchLog(stdoutPath, "tela de TOTP ja estava aberta.");
+      }
 
       await appendLaunchLog(stdoutPath, "preenchendo TOTP.");
-      await typeIntoFocusedField(
-        client,
-        'input[autocomplete="one-time-code"], input[inputmode="numeric"], input[type="tel"], input[name*="code" i], input[id*="code" i], input[aria-label*="code" i], input[type="text"], input:not([type])',
-        getTotpCode(account.totpSecret),
-      );
-      await clickJagexContinue(client);
+      const totpCookieResult = await clickJagexCookiePromptIfPresent(client, 2500);
+      if (totpCookieResult.clicked) {
+        await appendLaunchLog(stdoutPath, `cookies Jagex acionado: ${totpCookieResult.label || "botao"}.`);
+      }
+      await fillJagexTotpAndContinue(client, getTotpCode(account.totpSecret));
       await appendLaunchLog(stdoutPath, "autenticacao enviada.");
+      const consentResult = await clickJagexConsentIfPresent(client);
+      if (consentResult.clicked) {
+        await appendLaunchLog(stdoutPath, `consentimento Jagex acionado: ${consentResult.label || "botao"}.`);
+      } else if (consentResult.done) {
+        await appendLaunchLog(stdoutPath, "redirect Jagex detectado.");
+      } else if (consentResult.timeout) {
+        await appendLaunchLog(stdoutPath, "consentimento Jagex nao apareceu dentro do tempo.");
+      }
       if (stopDebugMonitor) {
-        await sleep(8000);
+        await sleep(4000);
         stopDebugMonitor();
       }
     } finally {
@@ -2155,17 +2686,24 @@ async function launchAccount(index, options = {}) {
   const baseRow = rows.find((item) => item.index === index);
   const row = options.rowOverride ? { ...baseRow, ...options.rowOverride } : baseRow;
   const account = accounts[index];
+  const botClient = normalizeBotClient(row?.botClient);
 
   if (!row) throw new Error(`Account index ${index} is not configured in farm.json.`);
   if (!row.enabled && !options.allowDisabled) throw new Error(`Account index ${index} is not enabled in farm.json.`);
   if (!account) throw new Error(`Account index ${index} was not found in accounts.txt.`);
-  if (!existsSync(config.launcherPath)) throw new Error(`DreamBot launcher not found: ${config.launcherPath}`);
+  if (botClient === "tribot") {
+    const tribotCliPath = resolveTribotCliPath(config);
+    if (!tribotCliPath) throw new Error(`TRiBot CLI not found: ${config.tribotCliPath || "(vazio)"}`);
+    config.tribotCliPath = tribotCliPath;
+  } else if (!existsSync(config.launcherPath)) {
+    throw new Error(`DreamBot launcher not found: ${config.launcherPath}`);
+  }
 
   const existingLaunches = await reconcileLaunches(await readState(), await getJavaProcesses());
   const existingLaunch = existingLaunches.find((item) => Number(item.index) === index && isLaunchActive(item));
   if (existingLaunch) throw new Error(`Account ${account.email} is already running.`);
 
-  const nickCaptureReady = !options.skipNickCapture && !row.charName
+  const nickCaptureReady = botClient !== "tribot" && !options.skipNickCapture && !row.charName
     ? await ensureNickCaptureJarInstalled()
     : false;
 
@@ -2195,7 +2733,7 @@ async function launchAccount(index, options = {}) {
       message: "Conta sem nick: capturando nick antes do launch real.",
     };
   }
-  if (!options.skipNickCapture && !row.charName && !nickCaptureReady) {
+  if (botClient !== "tribot" && !options.skipNickCapture && !row.charName && !nickCaptureReady) {
     await mkdir(logsDir, { recursive: true });
     const safeEmail = account.email.replace(/[^a-zA-Z0-9._-]/g, "_");
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -2210,15 +2748,16 @@ async function launchAccount(index, options = {}) {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const stdoutPath = join(logsDir, `${stamp}-${safeEmail}.out.log`);
   const stderrPath = join(logsDir, `${stamp}-${safeEmail}.err.log`);
-  const remoteDebuggingPort = usesBrowserLogin(row, config)
-    ? await findAvailablePort(51000 + (index * 100))
+  const remoteDebuggingPort = botClient === "dreambot" && usesBrowserLogin(row, config)
+    ? await findAvailablePort(51000 + (index * 100), { minPort: 51000, maxPort: 65499, attempts: 700 })
     : 0;
   const safeArgs = buildSafeArgs({ account, row, config, remoteDebuggingPort });
   await appendLaunchLog(
     stdoutPath,
-    `preparando launch: ${row.scheduleName ? `schedule=${row.scheduleName}` : `script=${row.scriptName || config.defaultScriptName || "-"}`}.`,
+    `preparando launch ${botClient}: ${botClient === "dreambot" && row.scheduleName ? `schedule=${row.scheduleName}` : `script=${row.scriptName || config.defaultScriptName || "-"}`}.`,
   );
-  const child = spawn("java", buildArgs({ account, row, config, remoteDebuggingPort }), {
+  const launchCommand = botClient === "tribot" ? resolveTribotCliPath(config) : "java";
+  const child = spawn(launchCommand, buildArgs({ account, row, config, remoteDebuggingPort }), {
     cwd: rootDir,
     windowsHide: true,
     detached: true,
@@ -2242,6 +2781,7 @@ async function launchAccount(index, options = {}) {
     taskId: options.taskId || "",
     taskName: options.taskName || "",
     scriptName: row.scriptName,
+    botClient,
     scheduleName: row.scheduleName || "",
     scriptParams: row.scriptParams,
     accountNickname: row.accountNickname || "",
@@ -2249,23 +2789,25 @@ async function launchAccount(index, options = {}) {
     world: resolveWorld(row, config),
     pid: child.pid,
     startedAt: new Date().toISOString(),
-    commandPreview: formatCommandPreview(safeArgs),
+    commandPreview: formatCommandPreview([launchCommand, ...safeArgs]),
     remoteDebuggingPort,
     stdout: stdoutPath,
     stderr: stderrPath,
   });
   await writeState(state);
 
-  if (remoteDebuggingPort) {
+  if (botClient === "dreambot" && remoteDebuggingPort) {
     enqueueJagexLoginAutomation({ account, index, config, portToUse: remoteDebuggingPort, stdoutPath });
   }
-  monitorDreamBotIdentity({
-    index,
-    account,
-    launcherPid: child.pid,
-    startedAt: new Date().toISOString(),
-    stdoutPath,
-  }).catch((error) => appendLaunchLog(stdoutPath, `falha no monitor de nick: ${error.message}`));
+  if (botClient === "dreambot") {
+    monitorDreamBotIdentity({
+      index,
+      account,
+      launcherPid: child.pid,
+      startedAt: new Date().toISOString(),
+      stdoutPath,
+    }).catch((error) => appendLaunchLog(stdoutPath, `falha no monitor de nick: ${error.message}`));
+  }
 
   return { pid: child.pid, startedAt: state.at(-1)?.startedAt, stdout: stdoutPath };
 }
@@ -2273,8 +2815,336 @@ async function launchAccount(index, options = {}) {
 async function stopProcess(pid) {
   const parsed = Number(pid);
   if (!Number.isInteger(parsed)) throw new Error("Invalid pid.");
-  process.kill(parsed);
+  await terminateProcessTree(parsed);
   return { stopped: parsed };
+}
+
+async function terminateProcessTree(pid) {
+  const parsed = Number(pid);
+  if (!Number.isInteger(parsed) || parsed <= 0) return false;
+  if (!isProcessRunning(parsed)) return false;
+  if (process.platform === "win32") {
+    try {
+      await execFileAsync("taskkill.exe", ["/PID", String(parsed), "/T", "/F"], {
+        windowsHide: true,
+        timeout: 8000,
+      });
+      return true;
+    } catch {
+      // Fall back to Node's process.kill below.
+    }
+  }
+  process.kill(parsed);
+  return true;
+}
+
+async function stopActiveLaunchesForIndex(index, reason = "parado pelo checker") {
+  const parsed = Number(index);
+  if (!Number.isInteger(parsed)) return [];
+  const appState = await readAppState();
+  javaProcessCache.at = 0;
+  const javaProcesses = await getJavaProcesses();
+  const reconciled = await reconcileLaunches(appState.launches || [], javaProcesses);
+  const accounts = await readAccounts();
+  const account = accounts[parsed] || {};
+  const stopped = [];
+  const now = new Date().toISOString();
+  const targetLaunches = reconciled.filter((launch) => Number(launch.index) === parsed);
+  const targetPids = new Set();
+
+  for (const launch of targetLaunches) {
+    for (const pid of [launch.effectivePid, launch.clientPid, launch.pid].map(Number)) {
+      if (Number.isInteger(pid) && pid > 0) targetPids.add(pid);
+    }
+    for (const processInfo of javaProcesses) {
+      if (!isDreamBotClientProcess(processInfo)) continue;
+      if (launchClientMatchScore(processInfo, launch) >= 90) targetPids.add(processInfo.pid);
+    }
+  }
+
+  const email = String(account.email || targetLaunches[0]?.email || "").toLowerCase();
+  if (email) {
+    for (const processInfo of javaProcesses) {
+      const haystack = `${processInfo.windowTitle || ""}\n${processInfo.commandLine || ""}`.toLowerCase();
+      if (isDreamBotClientProcess(processInfo) && haystack.includes(email)) targetPids.add(processInfo.pid);
+    }
+  }
+
+  for (const pid of targetPids) {
+    try {
+      if (await terminateProcessTree(pid)) stopped.push(pid);
+    } catch {
+      // The process may have already closed after DreamBot stopped the script.
+    }
+  }
+
+  appState.launches = reconciled.map((launch) => {
+    if (Number(launch.index) !== parsed) return launch;
+    return {
+      ...launch,
+      status: "StoppedOrUnknown",
+      stage: reason,
+      completionReason: reason,
+      routineCompleted: true,
+      completedAt: launch.completedAt || now,
+    };
+  });
+
+  await writeAppState(appState);
+  return stopped;
+}
+
+async function stopCheckerLaunches(body = {}) {
+  const index = Number(body.index);
+  if (Number.isInteger(index)) {
+    await appendCheckerLog("Stop manual solicitado para conta do checker", { index });
+    const stopped = await stopActiveLaunchesForIndex(index, "Checker encerrado manualmente");
+    await appendCheckerLog("Stop manual executado", { index, stopped: stopped.join(",") || "nenhum" });
+    return { stopped, indexes: [index] };
+  }
+
+  await appendCheckerLog("Stop manual solicitado para todos os helpers do checker");
+  const appState = await readAppState();
+  const reconciled = await reconcileLaunches(appState.launches || [], await getJavaProcesses());
+  const helperIndexes = [...new Set(reconciled
+    .filter((launch) => launch.scriptName === nickCaptureScriptName && isLaunchActive(launch))
+    .map((launch) => Number(launch.index))
+    .filter((item) => Number.isInteger(item)))];
+  const stopped = [];
+  for (const helperIndex of helperIndexes) {
+    stopped.push(...await stopActiveLaunchesForIndex(helperIndex, "Checker encerrado manualmente"));
+  }
+  await appendCheckerLog("Stop manual geral executado", { indexes: helperIndexes.join(",") || "nenhum", stopped: stopped.join(",") || "nenhum" });
+  return { stopped, indexes: helperIndexes };
+}
+
+async function saveCheckerResult(index, result) {
+  const parsed = Number(index);
+  if (!Number.isInteger(parsed)) throw new Error("Invalid account index.");
+  const state = await readAppState();
+  state.checker = {
+    ...(state.checker || {}),
+    [parsed]: {
+      index: parsed,
+      checkedAt: new Date().toISOString(),
+      ...result,
+    },
+  };
+  await writeAppState(state);
+  return state.checker[parsed];
+}
+
+async function saveCheckerHiscoresResult(index, charName, options = {}) {
+  try {
+    await appendCheckerLog("Consultando HiScores", { index, charName });
+    const stats = await getHiscores({ player: charName, refresh: true });
+    const result = await saveCheckerResult(index, {
+      status: "ok",
+      message: "Conta encontrada no HiScores.",
+      charName,
+      totalLevel: stats.totalLevel,
+      combatLevel: stats.combatLevel,
+    });
+    await appendCheckerLog("Conta encontrada no HiScores", { index, charName, totalLevel: stats.totalLevel });
+    if (options.closeClient) {
+      const stopped = await stopActiveLaunchesForIndex(index, "Checker finalizado: conta encontrada no HiScores");
+      if (options.stdoutPath && stopped.length) {
+        await appendLaunchLog(options.stdoutPath, `checker fechou client apos conta encontrada: pid ${stopped.join(", ")}.`);
+      }
+      await appendCheckerLog("Client fechado apos conta encontrada", { index, stopped: stopped.join(",") || "nenhum" });
+    }
+    return result;
+  } catch (error) {
+    if (error.code === "HISCORES_NOT_FOUND") {
+      await appendCheckerLog("Nick nao encontrado no HiScores", { index, charName });
+      const result = await saveCheckerResult(index, {
+        status: "banned",
+        message: "Nick não encontrado no HiScores. Provável banida.",
+        charName,
+      });
+      if (options.closeClient) {
+        const stopped = await stopActiveLaunchesForIndex(index, "Checker finalizado: nick não encontrado no HiScores");
+        if (options.stdoutPath && stopped.length) {
+          await appendLaunchLog(options.stdoutPath, `checker fechou client apos nick nao encontrado: pid ${stopped.join(", ")}.`);
+        }
+        await appendCheckerLog("Client fechado apos nick nao encontrado", { index, stopped: stopped.join(",") || "nenhum" });
+      }
+      return result;
+    }
+    await appendCheckerLog("Erro ao consultar HiScores", { index, charName, error: error.message || String(error) });
+    return saveCheckerResult(index, {
+      status: "error",
+      message: error.message || String(error),
+      charName,
+    });
+  }
+}
+
+async function monitorCheckerNickCapture({ index, account, startedAt, stdoutPath, timeoutMs = 150000 }) {
+  const startedMs = new Date(startedAt || Date.now()).getTime();
+  const deadline = Date.now() + timeoutMs;
+  const stalledDeadline = Date.now() + 90000;
+  await appendCheckerLog("Monitor de captura iniciado", { index, email: account.email, timeoutMs });
+
+  while (Date.now() < deadline) {
+    const stdout = await readTextTail(stdoutPath, 8000);
+    const dreamBotLogPath = await findLatestDreamBotLog(account.email, startedMs - 5000);
+    const dreamBotLog = dreamBotLogPath ? await readTextTail(dreamBotLogPath, 12000) : "";
+    const combined = `${stdout}\n${dreamBotLog}`;
+    const banReason = extractBanStatusFromText(combined);
+    const runtimeError = extractNickCaptureRuntimeError(combined);
+    const blockedReason = extractNickCaptureBlockedReason(combined);
+
+    if (runtimeError) {
+      await appendLaunchLog(stdoutPath, `checker detectou erro do helper: ${runtimeError}`);
+      await appendCheckerLog("Erro runtime detectado no helper", { index, error: runtimeError });
+      const result = await saveCheckerResult(index, {
+        status: "error",
+        message: runtimeError,
+        charName: "",
+      });
+      const stopped = await stopActiveLaunchesForIndex(index, runtimeError);
+      if (stopped.length) {
+        await appendLaunchLog(stdoutPath, `checker fechou client com erro: pid ${stopped.join(", ")}.`);
+      }
+      await appendCheckerLog("Stop apos erro runtime concluido", { index, stopped: stopped.join(",") || "nenhum" });
+      return result;
+    }
+
+    if (blockedReason) {
+      const reason = blockedReason;
+      await appendLaunchLog(stdoutPath, `checker abortou captura: ${reason}`);
+      await appendCheckerLog("Captura travada; abortando conta", { index, reason });
+      const result = await saveCheckerResult(index, {
+        status: "error",
+        message: reason,
+        charName: "",
+      });
+      const stopped = await stopActiveLaunchesForIndex(index, reason);
+      await appendCheckerLog("Stop apos captura travada concluido", { index, stopped: stopped.join(",") || "nenhum" });
+      return result;
+    }
+
+    if (banReason) {
+      await appendLaunchLog(stdoutPath, `checker marcou conta como banida: ${banReason}.`);
+      await appendCheckerLog("Ban detectado no DreamBot", { index, reason: banReason });
+      const result = await saveCheckerResult(index, {
+        status: "banned",
+        message: `Ban detectado no DreamBot: ${banReason}.`,
+        charName: "",
+      });
+      const stopped = await stopActiveLaunchesForIndex(index, `Conta banida: ${banReason}`);
+      if (stopped.length) {
+        await appendLaunchLog(stdoutPath, `checker fechou client banido: pid ${stopped.join(", ")}.`);
+      }
+      await appendCheckerLog("Stop apos ban concluido", { index, stopped: stopped.join(",") || "nenhum" });
+      return result;
+    }
+
+    const charName = extractCharNameFromText(combined);
+    if (isLikelyRunescapeName(charName)) {
+      await saveCharNameForAccount(index, charName);
+      await appendLaunchLog(stdoutPath, `checker capturou nick: ${charName}.`);
+      await appendCheckerLog("Nick capturado pelo helper", { index, charName });
+      return saveCheckerHiscoresResult(index, charName, { closeClient: true, stdoutPath });
+    }
+
+    if (Date.now() > stalledDeadline) {
+      const reason = "Checker sem progresso na captura por 90s.";
+      await appendLaunchLog(stdoutPath, `checker abortou captura: ${reason}`);
+      await appendCheckerLog("Captura sem progresso; abortando conta", { index, reason });
+      const result = await saveCheckerResult(index, {
+        status: "error",
+        message: reason,
+        charName: "",
+      });
+      const stopped = await stopActiveLaunchesForIndex(index, reason);
+      await appendCheckerLog("Stop apos captura sem progresso concluido", { index, stopped: stopped.join(",") || "nenhum" });
+      return result;
+    }
+
+    await sleep(2000);
+  }
+
+  await appendLaunchLog(stdoutPath, "checker terminou sem capturar nick ou detectar ban.");
+  await appendCheckerLog("Timeout do monitor de captura", { index });
+  return saveCheckerResult(index, {
+    status: "error",
+    message: "Checker não conseguiu capturar nick ou ban dentro do tempo.",
+    charName: "",
+  });
+}
+
+async function checkAccountHiscores(body) {
+  const index = Number(body.index);
+  if (!Number.isInteger(index)) throw new Error("Invalid account index.");
+  await appendCheckerLog("Checagem solicitada", { index });
+  const config = await readConfig();
+  const accounts = await readAccounts();
+  const rows = normalizeConfigAccounts(config, accounts);
+  const row = rows.find((item) => Number(item.index) === index);
+  const account = accounts[index];
+  if (!row || !account) throw new Error(`Conta ${index} não encontrada.`);
+  await appendCheckerLog("Conta carregada para checker", { index, email: account.email, hasNick: row.charName ? "sim" : "nao" });
+
+  if (!row.charName) {
+    const alive = await reconcileLaunches(await readState(), await getJavaProcesses());
+    const running = alive.find((launch) => Number(launch.index) === index && isLaunchActive(launch));
+    let monitorTarget = running;
+    if (!running) {
+      await appendCheckerLog("Conta sem nick: preparando helper", { index });
+      const nickCaptureReady = await ensureNickCaptureJarInstalled();
+      if (!nickCaptureReady) {
+        await appendCheckerLog("Helper de captura nao encontrado", { index });
+        return saveCheckerResult(index, {
+          status: "error",
+          message: "Helper NeuraL Nick Capture não encontrado.",
+          charName: "",
+        });
+      }
+      const helperRow = {
+        ...row,
+        botClient: "dreambot",
+        scriptName: nickCaptureScriptName,
+        scheduleName: "",
+          scriptParams: [],
+        };
+      monitorTarget = await launchAccount(index, {
+        skipNickCapture: true,
+        allowDisabled: true,
+        taskName: "Checker · capturando nick",
+        rowOverride: helperRow,
+      });
+      await appendCheckerLog("Helper de captura iniciado", { index, pid: monitorTarget.pid, stdout: monitorTarget.stdout });
+    } else {
+      await appendCheckerLog("Helper/launch ja estava ativo para a conta", { index, pid: running.pid, status: running.status });
+    }
+    const result = await saveCheckerResult(index, {
+      status: "capturing",
+      message: running
+        ? "Conta sem nick. Captura de nick já está rodando."
+        : "Conta sem nick. Captura de nick iniciada no DreamBot.",
+      charName: "",
+    });
+
+    if (monitorTarget?.stdout) {
+      monitorCheckerNickCapture({
+        index,
+        account,
+        startedAt: monitorTarget.startedAt,
+        stdoutPath: monitorTarget.stdout,
+      }).catch((error) => {
+        saveCheckerResult(index, {
+          status: "error",
+          message: error.message || String(error),
+          charName: "",
+        }).catch(() => {});
+      });
+    }
+    return result;
+  }
+
+  return saveCheckerHiscoresResult(index, row.charName);
 }
 
 async function addAccount(body) {
@@ -2374,9 +3244,28 @@ async function bulkImportAccounts(body) {
   };
 }
 
+async function exportAccountsTxt(body = {}) {
+  const accounts = await readAccounts();
+  const indexes = Array.isArray(body.indexes)
+    ? body.indexes.map((index) => Number(index)).filter((index) => Number.isInteger(index) && index >= 0)
+    : [];
+  if (!indexes.length) throw new Error("Selecione ao menos uma conta para exportar.");
+  const selected = new Set(indexes);
+  const content = accounts
+    .filter((_, index) => selected.has(index))
+    .map((account) => `${account.email}:${account.password}:${account.totpSecret}`)
+    .join("\n");
+  return {
+    filename: `neural-accounts-${new Date().toISOString().slice(0, 10)}.txt`,
+    content: `${content}${content ? "\n" : ""}`,
+    exported: selected.size,
+  };
+}
+
 async function updateSettings(body) {
   const config = await readConfig();
   config.launcherPath = String(body.launcherPath || config.launcherPath || "");
+  config.tribotCliPath = String(body.tribotCliPath || "").trim();
   config.defaultScriptName = String(body.defaultScriptName || "");
   config.defaultWorld = Number(body.defaultWorld || 301);
   config.useGeneratedTotp = Boolean(body.useGeneratedTotp);
@@ -2675,6 +3564,9 @@ async function saveContinuousTask(body) {
   config.categories = normalizeCategories(config).includes(task.category)
     ? normalizeCategories(config)
     : normalizeCategories({ ...config, categories: [...config.categories, task.category] });
+  if (task.moveToCategoryOnComplete && !normalizeCategories(config).includes(task.moveToCategoryOnComplete)) {
+    config.categories = normalizeCategories({ ...config, categories: [...config.categories, task.moveToCategoryOnComplete] });
+  }
 
   const tasks = normalizeTasks(config);
   const existingIndex = tasks.findIndex((item) => item.id === task.id);
@@ -2865,7 +3757,7 @@ async function runContinuousCheck() {
   const proxies = normalizeProxies(config);
   const tasks = normalizeTasks(config).filter((task) => task.enabled);
   const alive = await reconcileLaunches(appState.launches, await getJavaProcesses());
-  await processLaunchNotifications({ config, appState, rows, reconciled: alive });
+  await processLaunchNotifications({ config, appState, rows, tasks, reconciled: alive });
   appState.launches = alive;
 
   if (!tasks.length) {
@@ -3019,6 +3911,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (url.pathname === "/api/accounts/export" && req.method === "POST") {
+      json(res, 200, await exportAccountsTxt(await parseBody(req)));
+      return;
+    }
+
     if (url.pathname === "/api/account/delete" && req.method === "POST") {
       json(res, 200, await deleteAccount(await parseBody(req)));
       return;
@@ -3116,6 +4013,31 @@ const server = createServer(async (req, res) => {
 
     if (url.pathname === "/api/hiscores" && req.method === "POST") {
       json(res, 200, await getHiscores(await parseBody(req)));
+      return;
+    }
+
+    if (url.pathname === "/api/checker/check" && req.method === "POST") {
+      json(res, 200, await checkAccountHiscores(await parseBody(req)));
+      return;
+    }
+
+    if (url.pathname === "/api/checker/log" && req.method === "GET") {
+      json(res, 200, await getCheckerLog());
+      return;
+    }
+
+    if (url.pathname === "/api/checker/log" && req.method === "POST") {
+      json(res, 200, await addCheckerLog(await parseBody(req)));
+      return;
+    }
+
+    if (url.pathname === "/api/checker/log/clear" && req.method === "POST") {
+      json(res, 200, await clearCheckerLog());
+      return;
+    }
+
+    if (url.pathname === "/api/checker/stop" && req.method === "POST") {
+      json(res, 200, await stopCheckerLaunches(await parseBody(req)));
       return;
     }
 

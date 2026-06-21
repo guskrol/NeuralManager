@@ -9,12 +9,12 @@ import org.dreambot.api.wrappers.interactive.Player;
 
 @ScriptManifest(
   category = Category.UTILITY,
-  name = "NeuraL Nick Capture Legacy Disabled",
+  name = "NeuraL Nick Capture v2",
   description = "Captures the logged-in character name for Neural Farm Control.",
   author = "NeuraL",
-  version = 1.0
+  version = 2.0
 )
-public class NeuralNickCapture extends AbstractScript {
+public class NeuralNickCaptureCompat extends AbstractScript {
   private long startedAt;
 
   @Override

@@ -4,5 +4,6 @@ farm.json
 web-farm-state.json
 data/
 logs/
+build/deps/
 *.bak
 *.tmp

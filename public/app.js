@@ -5,12 +5,27 @@ const state = {
   taskFormInitialized: false,
   showAllLaunches: false,
   queueStatusHideTimer: null,
+  selectedAccountIndexes: new Set(),
+  selectedCheckerIndexes: new Set(),
+  checkerBulkRunning: false,
+  checkerBulkCancelRequested: false,
+  currentCheckerIndex: null,
+  isLoadingState: false,
   accountFilters: {
     search: "",
     category: "",
     status: "",
     enabled: "",
     nick: "",
+    checker: "",
+  },
+  checkerFilters: {
+    search: "",
+    category: "",
+    status: "",
+    enabled: "",
+    nick: "",
+    result: "",
   },
 };
 
@@ -36,8 +51,38 @@ async function api(path, options = {}) {
   return data;
 }
 
+function renderCheckerLog(result) {
+  const output = $("#checkerLogOutput");
+  if (!output) return;
+  output.textContent = result?.text?.trim() || "Nenhum log do checker ainda.";
+  const pathNode = $("#checkerLogPath");
+  if (pathNode && result?.path) pathNode.textContent = result.path;
+  output.scrollTop = output.scrollHeight;
+}
+
+async function loadCheckerLog() {
+  renderCheckerLog(await api("/api/checker/log", { method: "GET" }));
+}
+
+async function clearCheckerLog() {
+  renderCheckerLog(await api("/api/checker/log/clear", { method: "POST", body: JSON.stringify({}) }));
+  toast("Log do checker limpo.");
+}
+
+async function writeCheckerLog(message, details = {}) {
+  try {
+    renderCheckerLog(await api("/api/checker/log", {
+      method: "POST",
+      body: JSON.stringify({ message, details }),
+    }));
+  } catch {
+    // Logging must never interrupt the checker queue.
+  }
+}
+
 function fillSettings(config) {
   $("#launcherPath").value = config.launcherPath || "";
+  $("#tribotCliPath").value = config.tribotCliPath || "";
   $("#defaultScriptName").value = config.defaultScriptName || "";
   $("#defaultWorld").value = config.defaultWorld || 301;
   $("#maxInstances").value = config.maxInstances || 1;
@@ -179,6 +224,7 @@ function renderAccounts(snapshot) {
   const activityByIndex = buildAccountActivity(snapshot.launches || []);
   const proxyOptions = buildProxyOptions(snapshot.proxies || []);
   const categoryOptions = buildCategoryOptions(snapshot.categories || []);
+  const checker = snapshot.checker || {};
   renderAccountFilterOptions(snapshot.categories || []);
   syncAccountFilterInputs();
   const filteredRows = getFilteredAccountRows(snapshot);
@@ -188,12 +234,15 @@ function renderAccounts(snapshot) {
   for (const row of filteredRows) {
     const account = byIndex.get(row.index);
     const activity = activityByIndex.get(Number(row.index)) || accountActivityFallback(row);
+    const checkerResult = checker[row.index];
+    const totalLevel = Number(checkerResult?.totalLevel || 0) > 0 ? checkerResult.totalLevel : "-";
     const summary = buildAccountSummary({ account, row, activity });
     const tr = document.createElement("tr");
     tr.classList.toggle("account-running", activity.health === "online");
+    tr.classList.toggle("account-banned", checkerResult?.status === "banned");
     tr.dataset.index = row.index;
     tr.innerHTML = `
-      <td><input class="row-enabled account-enabled-checkbox" type="checkbox" aria-label="Conta ativa" ${row.enabled ? "checked" : ""} /></td>
+      <td><input class="row-selected account-select-checkbox" type="checkbox" aria-label="Selecionar conta" ${state.selectedAccountIndexes.has(Number(row.index)) ? "checked" : ""} /></td>
       <td>
         <span class="account-email">${account?.email || "(sem conta)"}</span>
         <span class="account-meta char-name-display">Nick: ${row.charName ? escapeHtml(row.charName) : "aguardando script"}</span>
@@ -201,6 +250,11 @@ function renderAccounts(snapshot) {
       </td>
       <td><input class="row-notes" value="${escapeHtml(row.notes || "")}" placeholder="o que esta fazendo" /></td>
       <td>${renderAccountHealth(activity, row)}</td>
+      <td>
+        <span class="checker-pill compact ${escapeHtml(checkerStatusClass(checkerResult))}">${escapeHtml(checkerStatusLabel(checkerResult))}</span>
+        ${checkerResult?.checkedAt ? `<span class="account-meta">${escapeHtml(formatDateTime(checkerResult.checkedAt))}</span>` : ""}
+      </td>
+      <td><strong class="checker-total-level">${escapeHtml(String(totalLevel))}</strong></td>
       <td><select class="row-category">${categoryOptions(row.category)}</select></td>
       <td><input class="row-script" value="${escapeHtml(row.scriptName || "")}" /></td>
       <td><input class="row-schedule" value="${escapeHtml(row.scheduleName || "")}" placeholder="schedule" /></td>
@@ -224,6 +278,10 @@ function renderAccounts(snapshot) {
       </td>
       <td>
         <div class="row-actions">
+          <select class="row-launch-client" aria-label="Executor do launch">
+            <option value="dreambot">DreamBot</option>
+            <option value="tribot">TRiBot</option>
+          </select>
           <button class="primary launch-row" type="button">Launch</button>
           <button class="icon-button danger delete-account" type="button" aria-label="Excluir conta" title="Excluir conta">🗑</button>
         </div>
@@ -233,21 +291,110 @@ function renderAccounts(snapshot) {
   }
 
   if (!snapshot.rows.length) {
-    body.innerHTML = `<tr><td colspan="12">Nenhuma conta configurada ainda.</td></tr>`;
+    body.innerHTML = `<tr><td colspan="14">Nenhuma conta configurada ainda.</td></tr>`;
   } else if (!filteredRows.length) {
-    body.innerHTML = `<tr><td colspan="12">Nenhuma conta encontrada com os filtros atuais.</td></tr>`;
+    body.innerHTML = `<tr><td colspan="14">Nenhuma conta encontrada com os filtros atuais.</td></tr>`;
   }
   syncSelectAllAccounts();
+}
+
+function checkerStatusLabel(item) {
+  if (!item) return "Não checada";
+  if (item.status === "ok") return "Encontrada";
+  if (item.status === "banned") return "Provável banida";
+  if (item.status === "capturing") return "Capturando nick";
+  if (item.status === "error") return "Erro";
+  return item.status || "Não checada";
+}
+
+function checkerStatusClass(item) {
+  return item?.status || "unchecked";
+}
+
+function getFilteredCheckerRows(snapshot) {
+  if (!snapshot) return [];
+  const byIndex = new Map((snapshot.accounts || []).map((account) => [account.index, account]));
+  const activityByIndex = buildAccountActivity(snapshot.launches || []);
+  const checker = snapshot.checker || {};
+  return (snapshot.rows || []).filter((row) => {
+    const account = byIndex.get(row.index);
+    const activity = activityByIndex.get(Number(row.index)) || accountActivityFallback(row);
+    const result = checker[row.index]?.status || "unchecked";
+    if (state.checkerFilters.result && state.checkerFilters.result !== result) return false;
+    return accountMatchesFilters({ row, account, activity, proxies: snapshot.proxies || [], filters: state.checkerFilters, checkerStatus: result });
+  });
+}
+
+function renderChecker(snapshot) {
+  const body = $("#checkerBody");
+  if (!body) return;
+  body.innerHTML = "";
+  const byIndex = new Map(snapshot.accounts.map((account) => [account.index, account]));
+  const activityByIndex = buildAccountActivity(snapshot.launches || []);
+  const checker = snapshot.checker || {};
+  renderCheckerFilterOptions(snapshot.categories || []);
+  syncCheckerFilterInputs();
+  const filteredRows = getFilteredCheckerRows(snapshot);
+  $("#checkerFilterCount").textContent = `${filteredRows.length} de ${snapshot.rows.length}`;
+
+  for (const row of filteredRows) {
+    const account = byIndex.get(row.index);
+    const activity = activityByIndex.get(Number(row.index)) || accountActivityFallback(row);
+    const result = checker[row.index];
+    const summary = buildAccountSummary({ account, row, activity });
+    const totalLevel = Number(result?.totalLevel || 0) > 0 ? result.totalLevel : "-";
+    const tr = document.createElement("tr");
+    tr.classList.toggle("account-running", activity.health === "online");
+    tr.classList.toggle("account-banned", result?.status === "banned");
+    tr.dataset.index = row.index;
+    tr.innerHTML = `
+      <td><input class="checker-row-selected account-select-checkbox" type="checkbox" aria-label="Selecionar conta no checker" ${state.selectedCheckerIndexes.has(Number(row.index)) ? "checked" : ""} /></td>
+      <td>
+        <span class="account-email">${escapeHtml(account?.email || "(sem conta)")}</span>
+        <span class="account-meta">index ${row.index}</span>
+      </td>
+      <td>${row.charName ? escapeHtml(row.charName) : `<span class="muted-text">aguardando captura</span>`}</td>
+      <td>${escapeHtml(row.category || "default")}</td>
+      <td>${escapeHtml(row.scheduleName || row.scriptName || "-")}</td>
+      <td>${renderAccountHealth(activity, row)}</td>
+      <td><strong>${escapeHtml(String(totalLevel))}</strong></td>
+      <td>
+        <input class="row-char-name" type="hidden" value="${escapeHtml(row.charName || "")}" />
+        <div class="summary-wrap">
+          <button class="icon-button account-summary" type="button" aria-label="Resumo da conta">👁</button>
+          <div class="summary-popover" role="tooltip">
+            ${summary}
+          </div>
+        </div>
+      </td>
+      <td>
+        <span class="checker-pill ${escapeHtml(checkerStatusClass(result))}">${escapeHtml(checkerStatusLabel(result))}</span>
+        <span class="account-meta">${escapeHtml(result?.message || "")}</span>
+        <span class="account-meta">${result?.checkedAt ? escapeHtml(formatDateTime(result.checkedAt)) : ""}</span>
+      </td>
+      <td><button class="primary check-account" type="button">CHECAR</button></td>
+    `;
+    body.appendChild(tr);
+  }
+
+  if (!snapshot.rows.length) {
+    body.innerHTML = `<tr><td colspan="10">Nenhuma conta configurada ainda.</td></tr>`;
+  } else if (!filteredRows.length) {
+    body.innerHTML = `<tr><td colspan="10">Nenhuma conta encontrada com os filtros atuais.</td></tr>`;
+  }
+  syncSelectAllCheckerAccounts();
 }
 
 function getFilteredAccountRows(snapshot) {
   if (!snapshot) return [];
   const byIndex = new Map((snapshot.accounts || []).map((account) => [account.index, account]));
   const activityByIndex = buildAccountActivity(snapshot.launches || []);
+  const checker = snapshot.checker || {};
   return (snapshot.rows || []).filter((row) => {
     const account = byIndex.get(row.index);
     const activity = activityByIndex.get(Number(row.index)) || accountActivityFallback(row);
-    return accountMatchesFilters({ row, account, activity, proxies: snapshot.proxies || [] });
+    const checkerStatus = checker[row.index]?.status || "unchecked";
+    return accountMatchesFilters({ row, account, activity, proxies: snapshot.proxies || [], filters: state.accountFilters, checkerStatus });
   });
 }
 
@@ -262,22 +409,44 @@ function renderAccountFilterOptions(categories) {
   state.accountFilters.category = select.value;
 }
 
+function renderCheckerFilterOptions(categories) {
+  const select = $("#checkerFilterCategory");
+  if (!select) return;
+  const current = state.checkerFilters.category;
+  const values = [...new Set(categories.map((category) => String(category || "").trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  select.innerHTML = `<option value="">Todas</option>${values.map((category) => `
+    <option value="${escapeHtml(category)}">${escapeHtml(category)}</option>
+  `).join("")}`;
+  select.value = values.includes(current) ? current : "";
+  state.checkerFilters.category = select.value;
+}
+
 function syncAccountFilterInputs() {
   $("#accountSearch").value = state.accountFilters.search;
   $("#accountFilterCategory").value = state.accountFilters.category;
   $("#accountFilterStatus").value = state.accountFilters.status;
   $("#accountFilterEnabled").value = state.accountFilters.enabled;
   $("#accountFilterNick").value = state.accountFilters.nick;
+  $("#accountFilterChecker").value = state.accountFilters.checker;
 }
 
-function accountMatchesFilters({ row, account, activity, proxies }) {
-  const filters = state.accountFilters;
+function syncCheckerFilterInputs() {
+  $("#checkerSearch").value = state.checkerFilters.search;
+  $("#checkerFilterCategory").value = state.checkerFilters.category;
+  $("#checkerFilterStatus").value = state.checkerFilters.status;
+  $("#checkerFilterEnabled").value = state.checkerFilters.enabled;
+  $("#checkerFilterNick").value = state.checkerFilters.nick;
+  $("#checkerFilterResult").value = state.checkerFilters.result;
+}
+
+function accountMatchesFilters({ row, account, activity, proxies, filters, checkerStatus = "" }) {
   if (filters.category && row.category !== filters.category) return false;
   if (filters.status && activity.health !== filters.status) return false;
   if (filters.enabled === "enabled" && !row.enabled) return false;
   if (filters.enabled === "disabled" && row.enabled) return false;
   if (filters.nick === "with" && !row.charName) return false;
   if (filters.nick === "without" && row.charName) return false;
+  if (filters.checker && (checkerStatus || "unchecked") !== filters.checker) return false;
 
   const proxy = proxies.find((item) => item.id === row.proxyId);
   const haystack = [
@@ -309,7 +478,7 @@ function accountMatchesFilters({ row, account, activity, proxies }) {
 
 function syncSelectAllAccounts() {
   const checkbox = $("#selectAllAccounts");
-  const rows = $$("#accountsBody .row-enabled");
+  const rows = $$("#accountsBody .row-selected");
   const checked = rows.filter((item) => item.checked).length;
   checkbox.checked = rows.length > 0 && checked === rows.length;
   checkbox.indeterminate = checked > 0 && checked < rows.length;
@@ -318,13 +487,67 @@ function syncSelectAllAccounts() {
 }
 
 function selectedAccountRows() {
-  return $$("#accountsBody tr[data-index]").filter((tr) => tr.querySelector(".row-enabled")?.checked);
+  return $$("#accountsBody tr[data-index]").filter((tr) => tr.querySelector(".row-selected")?.checked);
+}
+
+function clearAccountSelection() {
+  state.selectedAccountIndexes.clear();
+  for (const checkbox of $$("#accountsBody .row-selected")) {
+    checkbox.checked = false;
+  }
+  syncSelectAllAccounts();
+}
+
+function selectedCheckerRows() {
+  return $$("#checkerBody tr[data-index]").filter((tr) => tr.querySelector(".checker-row-selected")?.checked);
+}
+
+function setAccountSelected(index, selected) {
+  const parsed = Number(index);
+  if (!Number.isInteger(parsed)) return;
+  if (selected) {
+    state.selectedAccountIndexes.add(parsed);
+  } else {
+    state.selectedAccountIndexes.delete(parsed);
+  }
+}
+
+function setCheckerSelected(index, selected) {
+  const parsed = Number(index);
+  if (!Number.isInteger(parsed)) return;
+  if (selected) {
+    state.selectedCheckerIndexes.add(parsed);
+  } else {
+    state.selectedCheckerIndexes.delete(parsed);
+  }
 }
 
 function syncBulkAccountBar(selectedCount = selectedAccountRows().length) {
   const bar = $("#bulkAccountBar");
   bar.hidden = selectedCount === 0;
   $("#bulkAccountCount").textContent = `${selectedCount} selecionada(s)`;
+}
+
+function syncCheckerBulkBar(selectedCount = selectedCheckerRows().length) {
+  const bar = $("#checkerBulkBar");
+  if (!bar) return;
+  bar.hidden = selectedCount === 0;
+  $("#checkerBulkCount").textContent = `${selectedCount} selecionada(s)`;
+  const button = $("#checkSelectedAccountsBtn");
+  if (button) button.disabled = state.checkerBulkRunning || selectedCount === 0;
+  const stopButton = $("#stopCheckerQueueBtn");
+  if (stopButton) stopButton.disabled = !state.checkerBulkRunning;
+}
+
+function syncSelectAllCheckerAccounts() {
+  const checkbox = $("#selectAllCheckerAccounts");
+  if (!checkbox) return;
+  const rows = $$("#checkerBody .checker-row-selected");
+  const checked = rows.filter((item) => item.checked).length;
+  checkbox.checked = rows.length > 0 && checked === rows.length;
+  checkbox.indeterminate = checked > 0 && checked < rows.length;
+  checkbox.disabled = rows.length === 0 || state.checkerBulkRunning;
+  syncCheckerBulkBar(checked);
 }
 
 function buildAccountActivity(launches) {
@@ -600,6 +823,35 @@ const statTiles = [
   ["slayer", "Slayer_icon.png"],
 ];
 
+const completionSkillOptions = [
+  ["", "Sem meta"],
+  ["attack", "Attack"],
+  ["strength", "Strength"],
+  ["defence", "Defence"],
+  ["ranged", "Ranged"],
+  ["magic", "Magic"],
+  ["hitpoints", "Hitpoints"],
+  ["prayer", "Prayer"],
+  ["cooking", "Cooking"],
+  ["woodcutting", "Woodcutting"],
+  ["fletching", "Fletching"],
+  ["fishing", "Fishing"],
+  ["firemaking", "Firemaking"],
+  ["crafting", "Crafting"],
+  ["smithing", "Smithing"],
+  ["mining", "Mining"],
+  ["herblore", "Herblore"],
+  ["agility", "Agility"],
+  ["thieving", "Thieving"],
+  ["slayer", "Slayer"],
+  ["farming", "Farming"],
+  ["runecraft", "Runecraft"],
+  ["hunter", "Hunter"],
+  ["construction", "Construction"],
+  ["overall", "Total level"],
+  ["combat", "Combat"],
+];
+
 function osrsIcon(filename, alt) {
   const src = `https://oldschool.runescape.wiki/images/${encodeURIComponent(filename)}`;
   return `<img class="osrs-skill-icon" src="${src}" alt="${escapeHtml(alt)}" loading="lazy" />`;
@@ -657,6 +909,42 @@ async function loadSummaryStats(tr, refresh = false) {
   }
 }
 
+function positionSummaryPopover(wrap) {
+  const button = wrap?.querySelector(".account-summary");
+  const popover = wrap?.querySelector(".summary-popover");
+  if (!button || !popover) return;
+
+  const rect = button.getBoundingClientRect();
+  const viewportPadding = 16;
+  const width = Math.min(360, window.innerWidth - viewportPadding * 2);
+  const preferredHeight = Math.min(520, Math.max(260, popover.scrollHeight || 320), window.innerHeight - viewportPadding * 2);
+  const openUp = rect.bottom + 8 + preferredHeight > window.innerHeight && rect.top > preferredHeight;
+  const left = Math.max(viewportPadding, Math.min(window.innerWidth - width - viewportPadding, rect.right - width));
+  const top = openUp
+    ? Math.max(viewportPadding, rect.top - preferredHeight - 8)
+    : Math.min(window.innerHeight - preferredHeight - viewportPadding, rect.bottom + 8);
+
+  popover.style.position = "fixed";
+  popover.style.left = `${left}px`;
+  popover.style.right = "auto";
+  popover.style.top = `${Math.max(viewportPadding, top)}px`;
+  popover.style.width = `${width}px`;
+  popover.style.maxHeight = `${window.innerHeight - viewportPadding * 2}px`;
+  popover.style.zIndex = "10000";
+}
+
+function clearSummaryPopoverPosition(wrap) {
+  const popover = wrap?.querySelector(".summary-popover");
+  if (!popover) return;
+  for (const property of ["position", "left", "right", "top", "width", "maxHeight", "zIndex"]) {
+    popover.style[property] = "";
+  }
+}
+
+function clearAllSummaryPopovers() {
+  $$(".summary-wrap").forEach(clearSummaryPopoverPosition);
+}
+
 function renderContinuous(snapshot) {
   const continuous = snapshot.continuous || {};
   const config = continuous.config || {};
@@ -688,7 +976,34 @@ function renderCategoryControls(categories) {
       select.value = safeCategories.includes(selected) ? selected : safeCategories[0];
     }
   }
+  const bulkCategory = $("#bulkCategory");
+  if (bulkCategory) {
+    const selected = bulkCategory.value || "";
+    bulkCategory.innerHTML = `<option value="">Categoria</option>${safeCategories
+      .map((category) => `<option value="${escapeHtml(category)}"${category === selected ? " selected" : ""}>${escapeHtml(category)}</option>`)
+      .join("")}`;
+    bulkCategory.value = selected && safeCategories.includes(selected) ? selected : "";
+  }
+  const moveSelect = $("#taskMoveToCategory");
+  if (moveSelect) {
+    const selected = moveSelect.value || "";
+    moveSelect.innerHTML = `<option value="">Não mover</option>${safeCategories
+      .map((category) => `<option value="${escapeHtml(category)}"${category === selected ? " selected" : ""}>${escapeHtml(category)}</option>`)
+      .join("")}`;
+    moveSelect.value = selected && safeCategories.includes(selected) ? selected : "";
+  }
+  renderCompletionSkillOptions();
   renderCategoriesList(safeCategories);
+}
+
+function renderCompletionSkillOptions() {
+  const select = $("#taskCompletionSkill");
+  if (!select) return;
+  const selected = select.value || "";
+  select.innerHTML = completionSkillOptions
+    .map(([value, label]) => `<option value="${escapeHtml(value)}"${value === selected ? " selected" : ""}>${escapeHtml(label)}</option>`)
+    .join("");
+  select.value = completionSkillOptions.some(([value]) => value === selected) ? selected : "";
 }
 
 function renderCategoriesList(categories) {
@@ -739,6 +1054,8 @@ function renderContinuousTasks(tasks) {
       <td>${escapeHtml(task.scheduleName || "-")}</td>
       <td>${escapeHtml((task.scriptParams || []).join(" ") || "-")}</td>
       <td>${escapeHtml(proxyLabelForTask(task))}</td>
+      <td>${escapeHtml(taskGoalLabel(task))}</td>
+      <td>${escapeHtml(task.moveToCategoryOnComplete || "-")}</td>
       <td>${task.maxInstances}</td>
       <td>${task.cooldownMinutes}min</td>
       <td>
@@ -754,8 +1071,14 @@ function renderContinuousTasks(tasks) {
   }
 
   if (!tasks.length) {
-    body.innerHTML = `<tr><td colspan="9">Nenhuma continuous task criada ainda.</td></tr>`;
+    body.innerHTML = `<tr><td colspan="12">Nenhuma continuous task criada ainda.</td></tr>`;
   }
+}
+
+function taskGoalLabel(task) {
+  if (!task.completionSkill || !task.completionLevel) return "-";
+  const option = completionSkillOptions.find(([value]) => value === task.completionSkill);
+  return `${option?.[1] || task.completionSkill} >= ${task.completionLevel}`;
 }
 
 function renderContinuousLogs(logs) {
@@ -807,22 +1130,44 @@ function switchTab(targetId) {
     panel.classList.toggle("active", isActive);
     panel.hidden = !isActive;
   }
+  if (targetId === "checkerPanel") {
+    loadCheckerLog().catch(() => {});
+  }
+}
+
+function activeTabId() {
+  return $(".tab-panel.active")?.id || "accountsPanel";
 }
 
 async function loadState() {
   if (state.isEditingAccountRow) return;
-  const snapshot = await api("/api/state");
-  state.snapshot = snapshot;
-  $("#agentStatus").textContent = "Online";
-  $("#agentStatus").classList.add("ok");
-  renderVersion(snapshot.version);
-  renderDashboard(snapshot);
-  renderDiagnostics(snapshot.diagnostics);
-  fillSettings(snapshot.config);
-  renderAccounts(snapshot);
-  renderProxies(snapshot.proxies);
-  renderLaunches(snapshot.launches);
-  renderContinuous(snapshot);
+  if (state.isLoadingState) return;
+  state.isLoadingState = true;
+  try {
+    const snapshot = await api("/api/state");
+    state.snapshot = snapshot;
+    $("#agentStatus").textContent = "Online";
+    $("#agentStatus").classList.add("ok");
+    renderVersion(snapshot.version);
+    renderDashboard(snapshot);
+    renderDiagnostics(snapshot.diagnostics);
+    fillSettings(snapshot.config);
+    renderAccounts(snapshot);
+    renderChecker(snapshot);
+    renderProxies(snapshot.proxies);
+    renderLaunches(snapshot.launches);
+    renderContinuous(snapshot);
+    if (activeTabId() === "checkerPanel") {
+      loadCheckerLog().catch(() => {});
+    }
+  } finally {
+    state.isLoadingState = false;
+  }
+}
+
+async function refreshStatePreservingTab(targetId = activeTabId()) {
+  await loadState();
+  switchTab(targetId);
 }
 
 async function saveSettings(event) {
@@ -831,6 +1176,7 @@ async function saveSettings(event) {
     method: "POST",
     body: JSON.stringify({
       launcherPath: $("#launcherPath").value,
+      tribotCliPath: $("#tribotCliPath").value,
       defaultScriptName: $("#defaultScriptName").value,
       defaultWorld: Number($("#defaultWorld").value),
       maxInstances: Number($("#maxInstances").value),
@@ -906,6 +1252,28 @@ async function bulkImport(event) {
   }
   toast(`${result.added} conta(s) importada(s).`);
   await loadState();
+}
+
+async function exportAccounts() {
+  const indexes = selectedAccountRows().map((tr) => Number(tr.dataset.index));
+  if (!indexes.length) {
+    toast("Selecione ao menos uma conta para exportar.");
+    return;
+  }
+  const result = await api("/api/accounts/export", {
+    method: "POST",
+    body: JSON.stringify({ indexes }),
+  });
+  const blob = new Blob([result.content || ""], { type: "text/plain;charset=utf-8" });
+  const downloadUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = downloadUrl;
+  link.download = result.filename || "neural-accounts.txt";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(downloadUrl);
+  toast(`${result.exported || indexes.length} conta(s) exportada(s).`);
 }
 
 function renderBulkProxyResult(result) {
@@ -1004,8 +1372,10 @@ async function persistRow(tr) {
 }
 
 function rowPayload(tr) {
+  const index = Number(tr.dataset.index);
+  const existingRow = state.snapshot?.rows?.find((row) => Number(row.index) === index);
   return {
-    index: Number(tr.dataset.index),
+    index,
     charName: tr.querySelector(".row-char-name").value,
     notes: tr.querySelector(".row-notes").value,
     category: tr.querySelector(".row-category").value,
@@ -1015,7 +1385,7 @@ function rowPayload(tr) {
     world: Number(tr.querySelector(".row-world").value),
     worldMode: tr.querySelector(".row-world-mode").value,
     proxyId: tr.querySelector(".row-proxy").value,
-    enabled: tr.querySelector(".row-enabled").checked,
+    enabled: existingRow?.enabled !== false,
   };
 }
 
@@ -1039,9 +1409,21 @@ async function launchRow(tr) {
   await persistRow(tr);
   await api("/api/launch", {
     method: "POST",
-    body: JSON.stringify(rowPayload(tr)),
+    body: JSON.stringify({
+      ...rowPayload(tr),
+      botClient: tr.querySelector(".row-launch-client")?.value || "dreambot",
+    }),
   });
   toast("Launch enviado.");
+  await loadState();
+}
+
+async function checkAccount(index) {
+  const result = await api("/api/checker/check", {
+    method: "POST",
+    body: JSON.stringify({ index }),
+  });
+  toast(result.message || "Checagem executada.");
   await loadState();
 }
 
@@ -1076,6 +1458,78 @@ async function launchRowByIndex(index) {
 
 function sleep(ms) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function accountHasActiveLaunch(snapshot, index) {
+  return (snapshot?.launches || []).some((launch) =>
+    Number(launch.index) === Number(index) &&
+    (launch.status === "Running" || launch.status === "Starting")
+  );
+}
+
+function checkerResultIsFinal(snapshot, index) {
+  const status = snapshot?.checker?.[index]?.status || "";
+  return status === "ok" || status === "banned" || status === "error";
+}
+
+async function waitForCheckerAccountToClose(index, { timeoutMs = 2 * 60 * 1000, pollMs = 5000 } = {}) {
+  const startedAt = Date.now();
+  let sawActive = false;
+  await writeCheckerLog("Aguardando conta anterior finalizar", { index, timeoutMs });
+
+  while (Date.now() - startedAt < timeoutMs) {
+    if (state.checkerBulkCancelRequested) return false;
+    const snapshot = await api("/api/state");
+    state.snapshot = snapshot;
+    renderDashboard(snapshot);
+    renderChecker(snapshot);
+    switchTab("checkerPanel");
+
+    const active = accountHasActiveLaunch(snapshot, index);
+    const finalResult = checkerResultIsFinal(snapshot, index);
+    if (active) sawActive = true;
+    if (finalResult) {
+      await writeCheckerLog("Resultado final detectado para a conta anterior", {
+        index,
+        active: active ? "sim" : "nao",
+        waitedSeconds: Math.round((Date.now() - startedAt) / 1000),
+      });
+      if (active) {
+        await writeCheckerLog("Conta anterior ainda ativa apos resultado final; solicitando stop sem cancelar fila", { index });
+        await stopCheckerProcess(index, { keepQueueState: true, preserveQueue: true, quiet: true });
+      }
+      return true;
+    }
+    if (!active && sawActive) {
+      await writeCheckerLog("Conta anterior finalizada", {
+        index,
+        waitedSeconds: Math.round((Date.now() - startedAt) / 1000),
+      });
+      return true;
+    }
+
+    await writeCheckerLog("Conta anterior ainda ativa", {
+      index,
+      waitedSeconds: Math.round((Date.now() - startedAt) / 1000),
+    });
+    await sleep(pollMs);
+  }
+
+  await writeCheckerLog("Timeout aguardando conta anterior finalizar", {
+    index,
+    waitedSeconds: Math.round((Date.now() - startedAt) / 1000),
+  });
+  return false;
+}
+
+async function waitForCheckerQueueDelay(position, total, delayMs = 30000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < delayMs) {
+    if (state.checkerBulkCancelRequested) return;
+    const left = Math.ceil((delayMs - (Date.now() - startedAt)) / 1000);
+    $("#checkSelectedAccountsBtn").textContent = `Próxima em ${left}s (${position}/${total})`;
+    await sleep(Math.min(1000, delayMs - (Date.now() - startedAt)));
+  }
 }
 
 function setQueueStatus({ label = "Fila de launch", text = "", progress = 0, hidden = false }) {
@@ -1137,40 +1591,45 @@ async function launchAll() {
 
   try {
     const accountIndexes = new Set((state.snapshot.accounts || []).map((account) => Number(account.index)));
-    const enabled = state.snapshot.rows.filter((row) => row.enabled && accountIndexes.has(Number(row.index)));
+    const selectedIndexes = new Set(selectedAccountRows().map((tr) => Number(tr.dataset.index)));
+    const visibleRows = getFilteredAccountRows(state.snapshot);
+    const launchRows = selectedIndexes.size
+      ? visibleRows.filter((row) => selectedIndexes.has(Number(row.index)) && accountIndexes.has(Number(row.index)))
+      : visibleRows.filter((row) => row.enabled && accountIndexes.has(Number(row.index)));
+    const launchLabel = selectedIndexes.size ? "selecionada(s)" : "habilitada(s) visível(is)";
     const limit = Math.max(1, Number(state.snapshot.config.maxInstances || 1));
     const delay = Math.max(0, Number(state.snapshot.config.launchDelaySeconds || 0));
     let launched = 0;
-    if (!enabled.length) {
-      setQueueStatus({ text: "Nenhuma conta habilitada para launch.", progress: 0 });
+    if (!launchRows.length) {
+      setQueueStatus({ text: selectedIndexes.size ? "Nenhuma conta selecionada visível para launch." : "Nenhuma conta habilitada visível para launch.", progress: 0 });
       hideQueueStatus(3500);
       return;
     }
-    setQueueStatus({ text: `${enabled.length} launch(es) na fila`, progress: 0 });
+    setQueueStatus({ text: `${launchRows.length} conta(s) ${launchLabel} na fila`, progress: 0 });
 
-    for (let i = 0; i < enabled.length; i += 1) {
-      const remainingBefore = enabled.length - i;
+    for (let i = 0; i < launchRows.length; i += 1) {
+      const remainingBefore = launchRows.length - i;
       setQueueStatus({
-        text: `Lançando conta ${enabled[i].index} · ${remainingBefore} na fila`,
-        progress: (i / enabled.length) * 100,
+        text: `Lançando conta ${launchRows[i].index} · ${remainingBefore} na fila`,
+        progress: (i / launchRows.length) * 100,
       });
       try {
         await waitForLaunchSlot(limit);
-        await launchRowByIndex(enabled[i].index);
+        await launchRowByIndex(launchRows[i].index);
         launched += 1;
       } catch (error) {
-        toast(`Conta ${enabled[i].index}: ${error.message}`);
+        toast(`Conta ${launchRows[i].index}: ${error.message}`);
       }
-      if (i < enabled.length - 1 && delay > 0) {
-        await countdownLaunchDelay(delay, enabled.length - i - 1);
+      if (i < launchRows.length - 1 && delay > 0) {
+        await countdownLaunchDelay(delay, launchRows.length - i - 1);
         await loadState();
       }
     }
     setQueueStatus({
-      text: `${launched}/${enabled.length} conta(s) enviadas para launch.`,
+      text: `${launched}/${launchRows.length} conta(s) enviadas para launch.`,
       progress: 100,
     });
-    toast(`${launched}/${enabled.length} conta(s) enviadas para launch.`);
+    toast(`${launched}/${launchRows.length} conta(s) enviadas para launch.`);
     hideQueueStatus(5000);
   } finally {
     state.launchQueueRunning = false;
@@ -1268,6 +1727,9 @@ async function saveContinuousTask(event) {
       maxInstances: Number($("#taskMaxInstances").value),
       launchDelaySeconds: Number($("#taskLaunchDelaySeconds").value),
       cooldownMinutes: Number($("#taskCooldownMinutes").value),
+      completionSkill: $("#taskCompletionSkill").value,
+      completionLevel: Number($("#taskCompletionLevel").value),
+      moveToCategoryOnComplete: $("#taskMoveToCategory").value,
       enabled: $("#taskEnabled").checked,
     }),
   });
@@ -1290,6 +1752,9 @@ function fillTaskForm(task) {
   $("#taskMaxInstances").value = task.maxInstances || 1;
   $("#taskLaunchDelaySeconds").value = task.launchDelaySeconds || 0;
   $("#taskCooldownMinutes").value = task.cooldownMinutes || 0;
+  $("#taskCompletionSkill").value = task.completionSkill || "";
+  $("#taskCompletionLevel").value = task.completionLevel || "";
+  $("#taskMoveToCategory").value = task.moveToCategoryOnComplete || "";
   $("#taskEnabled").checked = task.enabled !== false;
   syncTaskWorldAndProxyControls();
 }
@@ -1309,6 +1774,9 @@ function resetTaskForm() {
     maxInstances: 1,
     launchDelaySeconds: state.snapshot?.config?.launchDelaySeconds || 0,
     cooldownMinutes: 30,
+    completionSkill: "",
+    completionLevel: "",
+    moveToCategoryOnComplete: "",
     enabled: true,
   });
 }
@@ -1351,22 +1819,109 @@ async function toggleAllAccounts(checked) {
   const rows = $$("#accountsBody tr[data-index]");
   if (!rows.length) return;
 
-  $("#selectAllAccounts").disabled = true;
   for (const tr of rows) {
-    tr.querySelector(".row-enabled").checked = checked;
+    tr.querySelector(".row-selected").checked = checked;
+    setAccountSelected(tr.dataset.index, checked);
   }
   syncSelectAllAccounts();
+  toast(checked ? "Contas visíveis selecionadas." : "Seleção das contas visíveis removida.");
+}
+
+async function toggleAllCheckerAccounts(checked) {
+  const rows = $$("#checkerBody tr[data-index]");
+  if (!rows.length || state.checkerBulkRunning) return;
+
+  for (const tr of rows) {
+    tr.querySelector(".checker-row-selected").checked = checked;
+    setCheckerSelected(tr.dataset.index, checked);
+  }
+  syncSelectAllCheckerAccounts();
+  toast(checked ? "Contas visíveis do checker selecionadas." : "Seleção do checker removida.");
+}
+
+async function checkSelectedAccounts() {
+  const indexes = [...state.selectedCheckerIndexes]
+    .map((index) => Number(index))
+    .filter((index) => Number.isInteger(index));
+  if (!indexes.length || state.checkerBulkRunning) {
+    toast("Nenhuma conta selecionada no checker.");
+    return;
+  }
+
+  state.checkerBulkRunning = true;
+  state.checkerBulkCancelRequested = false;
+  syncSelectAllCheckerAccounts();
+  $("#checkSelectedAccountsBtn").textContent = "Checando...";
+  await writeCheckerLog("Fila do checker iniciada", { total: indexes.length, indexes: indexes.join(",") });
 
   try {
-    for (const tr of rows) {
-      await persistRow(tr);
+    let previousIndex = null;
+    for (let position = 0; position < indexes.length; position += 1) {
+      if (state.checkerBulkCancelRequested) break;
+      if (previousIndex !== null) {
+        $("#checkSelectedAccountsBtn").textContent = `Confirmando anterior ${position}/${indexes.length}`;
+        const previousClosed = await waitForCheckerAccountToClose(previousIndex);
+        if (!previousClosed) {
+          toast(`Timeout aguardando a conta ${previousIndex} fechar. Encerrando processo.`);
+          await writeCheckerLog("Timeout na conta anterior; solicitando stop", { index: previousIndex });
+          await stopCheckerProcess(previousIndex, { keepQueueState: true, preserveQueue: true, quiet: true });
+        }
+        await refreshStatePreservingTab("checkerPanel");
+        if (state.checkerBulkCancelRequested) break;
+      }
+
+      const index = indexes[position];
+      state.currentCheckerIndex = index;
+      toast(`Checando ${position + 1} de ${indexes.length}...`);
+      $("#checkSelectedAccountsBtn").textContent = `Checando ${position + 1}/${indexes.length}`;
+      await writeCheckerLog("Iniciando checagem da conta", { index, position: position + 1, total: indexes.length });
+      const result = await api("/api/checker/check", {
+        method: "POST",
+        body: JSON.stringify({ index }),
+      });
+      await writeCheckerLog("Resposta inicial do checker", { index, status: result.status, message: result.message || "" });
+      if (result.status !== "capturing") {
+        await sleep(800);
+      }
+      await refreshStatePreservingTab("checkerPanel");
+      previousIndex = index;
     }
-    toast(checked ? "Todas as contas foram habilitadas." : "Todas as contas foram desabilitadas.");
-    await loadState();
+    if (previousIndex !== null) {
+      state.currentCheckerIndex = previousIndex;
+      $("#checkSelectedAccountsBtn").textContent = `Finalizando ${indexes.length}/${indexes.length}`;
+      await waitForCheckerAccountToClose(previousIndex);
+      await refreshStatePreservingTab("checkerPanel");
+    }
+    await writeCheckerLog(state.checkerBulkCancelRequested ? "Fila do checker encerrada manualmente" : "Fila do checker finalizada", { total: indexes.length });
+    toast(state.checkerBulkCancelRequested ? "Checker encerrado." : `Checker finalizado para ${indexes.length} conta(s).`);
+    await refreshStatePreservingTab("checkerPanel");
   } finally {
-    $("#selectAllAccounts").disabled = false;
-    syncSelectAllAccounts();
+    state.checkerBulkRunning = false;
+    state.checkerBulkCancelRequested = false;
+    state.currentCheckerIndex = null;
+    $("#checkSelectedAccountsBtn").textContent = "Checar selecionadas";
+    syncSelectAllCheckerAccounts();
   }
+}
+
+async function stopCheckerProcess(index = state.currentCheckerIndex, options = {}) {
+  if (!options.preserveQueue) {
+    state.checkerBulkCancelRequested = true;
+  }
+  const parsed = Number(index);
+  await writeCheckerLog("Stop do checker solicitado pelo painel", { index: Number.isInteger(parsed) ? parsed : "todos" });
+  await api("/api/checker/stop", {
+    method: "POST",
+    body: JSON.stringify({ index: Number.isInteger(parsed) ? parsed : null }),
+  });
+  if (!options.keepQueueState) {
+    state.checkerBulkRunning = false;
+    state.currentCheckerIndex = null;
+    $("#checkSelectedAccountsBtn").textContent = "Checar selecionadas";
+  }
+  if (!options.quiet) toast("Checker encerrado.");
+  await refreshStatePreservingTab("checkerPanel");
+  syncSelectAllCheckerAccounts();
 }
 
 async function applyBulkAccountFields() {
@@ -1378,10 +1933,11 @@ async function applyBulkAccountFields() {
 
   const scriptName = $("#bulkScriptName").value.trim();
   const scriptParams = $("#bulkScriptParams").value.trim();
+  const category = $("#bulkCategory").value;
   const worldMode = $("#bulkWorldMode").value;
   const world = Number($("#bulkWorld").value || 301);
 
-  if (!scriptName && !scriptParams && worldMode === "fixed" && !$("#bulkWorld").value.trim()) {
+  if (!category && !scriptName && !scriptParams && worldMode === "fixed" && !$("#bulkWorld").value.trim()) {
     toast("Preencha pelo menos um campo para aplicar.");
     return;
   }
@@ -1389,6 +1945,7 @@ async function applyBulkAccountFields() {
   $("#applyBulkAccountsBtn").disabled = true;
   try {
     for (const tr of rows) {
+      if (category) tr.querySelector(".row-category").value = category;
       if (scriptName) tr.querySelector(".row-script").value = scriptName;
       if (scriptParams) tr.querySelector(".row-args").value = scriptParams;
       tr.querySelector(".row-world-mode").value = worldMode;
@@ -1457,6 +2014,7 @@ document.addEventListener("click", async (event) => {
   const applyTaskButton = event.target.closest(".apply-task");
   const toggleTaskButton = event.target.closest(".toggle-task");
   const deleteTaskButton = event.target.closest(".delete-task");
+  const checkAccountButton = event.target.closest(".check-account");
 
   try {
     if (deleteAccountButton) {
@@ -1466,7 +2024,9 @@ document.addEventListener("click", async (event) => {
       await launchRow(launchButton.closest("tr"));
     }
     if (refreshSummaryStatsButton) {
-      const row = $(`#accountsBody tr[data-index="${refreshSummaryStatsButton.dataset.index}"]`);
+      const row = refreshSummaryStatsButton.closest("tr")
+        || $(`#accountsBody tr[data-index="${refreshSummaryStatsButton.dataset.index}"]`)
+        || $(`#checkerBody tr[data-index="${refreshSummaryStatsButton.dataset.index}"]`);
       if (row) await loadSummaryStats(row, true);
     }
     if (viewLaunchLogButton) {
@@ -1498,6 +2058,15 @@ document.addEventListener("click", async (event) => {
     if (deleteTaskButton) {
       await deleteTask(deleteTaskButton.closest("tr").dataset.taskId);
     }
+    if (checkAccountButton) {
+      await checkAccount(Number(checkAccountButton.closest("tr").dataset.index));
+    }
+    if (event.target.closest("#checkSelectedAccountsBtn")) {
+      await checkSelectedAccounts();
+    }
+    if (event.target.closest("#stopCheckerQueueBtn")) {
+      await stopCheckerProcess();
+    }
   } catch (error) {
     toast(error.message);
   }
@@ -1506,8 +2075,18 @@ document.addEventListener("click", async (event) => {
 document.addEventListener("mouseover", (event) => {
   const wrap = event.target.closest(".summary-wrap");
   if (!wrap) return;
+  positionSummaryPopover(wrap);
   const tr = wrap.closest("tr");
-  if (tr) loadSummaryStats(tr).catch((error) => toast(error.message));
+  if (tr) {
+    loadSummaryStats(tr)
+      .then(() => positionSummaryPopover(wrap))
+      .catch((error) => toast(error.message));
+  }
+});
+
+document.addEventListener("mouseout", (event) => {
+  const wrap = event.target.closest(".summary-wrap");
+  if (wrap && !wrap.contains(event.relatedTarget)) clearSummaryPopoverPosition(wrap);
 });
 
 document.addEventListener("change", (event) => {
@@ -1521,6 +2100,27 @@ document.addEventListener("change", (event) => {
     return;
   }
 
+  if (event.target.closest("#selectAllCheckerAccounts")) {
+    toggleAllCheckerAccounts(event.target.checked).catch((error) => toast(error.message));
+    return;
+  }
+
+  const checkerSelectedCheckbox = event.target.closest(".checker-row-selected");
+  if (checkerSelectedCheckbox) {
+    const tr = checkerSelectedCheckbox.closest("tr");
+    setCheckerSelected(tr?.dataset.index, checkerSelectedCheckbox.checked);
+    syncSelectAllCheckerAccounts();
+    return;
+  }
+
+  const selectedCheckbox = event.target.closest(".row-selected");
+  if (selectedCheckbox) {
+    const tr = selectedCheckbox.closest("tr");
+    setAccountSelected(tr?.dataset.index, selectedCheckbox.checked);
+    syncSelectAllAccounts();
+    return;
+  }
+
   const worldMode = event.target.closest(".row-world-mode");
   if (worldMode) {
     const input = worldMode.closest(".world-control").querySelector(".row-world");
@@ -1531,7 +2131,6 @@ document.addEventListener("change", (event) => {
   if (changedRowControl) {
     const tr = changedRowControl.closest("tr");
     persistRow(tr).catch((error) => toast(error.message));
-    if (changedRowControl.classList.contains("row-enabled")) syncSelectAllAccounts();
   }
 
   if (event.target.closest("#taskWorldMode, #taskProxyMode")) {
@@ -1568,6 +2167,7 @@ $("#bulkProxyForm").addEventListener("submit", (event) => bulkImportProxies(even
 $("#continuousSettingsForm").addEventListener("submit", (event) => saveContinuousSettings(event).catch((error) => toast(error.message)));
 $("#continuousTaskForm").addEventListener("submit", (event) => saveContinuousTask(event).catch((error) => toast(error.message)));
 $("#refreshBtn").addEventListener("click", () => loadState().catch((error) => toast(error.message)));
+$("#exportAccountsBtn").addEventListener("click", () => exportAccounts().catch((error) => toast(error.message)));
 document.addEventListener("click", (event) => {
   if (event.target.closest("#refreshDiagnosticsBtn")) {
     loadState().catch((error) => toast(error.message));
@@ -1583,6 +2183,8 @@ $("#continuousStartBtn").addEventListener("click", () => startContinuous().catch
 $("#continuousStopBtn").addEventListener("click", () => stopContinuous().catch((error) => toast(error.message)));
 $("#stopAllBtn").addEventListener("click", () => stopAll().catch((error) => toast(error.message)));
 $("#shutdownAgentBtn").addEventListener("click", () => shutdownAgent().catch((error) => toast(error.message)));
+window.addEventListener("scroll", clearAllSummaryPopovers, true);
+window.addEventListener("resize", clearAllSummaryPopovers);
 $("#activeLaunchesOnlyBtn").addEventListener("click", () => {
   state.showAllLaunches = false;
   renderLaunches(state.snapshot?.launches || []);
@@ -1597,24 +2199,48 @@ $("#resetTaskFormBtn").addEventListener("click", resetTaskForm);
 $("#accountSearch").addEventListener("input", (event) => {
   state.accountFilters.search = event.target.value.trim();
   if (!state.snapshot) return;
+  clearAccountSelection();
   renderDashboard(state.snapshot);
   renderAccounts(state.snapshot);
 });
-for (const id of ["accountFilterCategory", "accountFilterStatus", "accountFilterEnabled", "accountFilterNick"]) {
+for (const id of ["accountFilterCategory", "accountFilterStatus", "accountFilterEnabled", "accountFilterNick", "accountFilterChecker"]) {
   $(`#${id}`).addEventListener("change", (event) => {
     const key = id.replace("accountFilter", "").toLowerCase();
     state.accountFilters[key] = event.target.value;
     if (!state.snapshot) return;
+    clearAccountSelection();
     renderDashboard(state.snapshot);
     renderAccounts(state.snapshot);
   });
 }
 $("#clearAccountFiltersBtn").addEventListener("click", () => {
-  state.accountFilters = { search: "", category: "", status: "", enabled: "", nick: "" };
+  state.accountFilters = { search: "", category: "", status: "", enabled: "", nick: "", checker: "" };
   if (!state.snapshot) return;
+  clearAccountSelection();
   renderDashboard(state.snapshot);
   renderAccounts(state.snapshot);
 });
+
+$("#checkerSearch").addEventListener("input", (event) => {
+  state.checkerFilters.search = event.target.value.trim();
+  if (!state.snapshot) return;
+  renderChecker(state.snapshot);
+});
+for (const id of ["checkerFilterCategory", "checkerFilterStatus", "checkerFilterEnabled", "checkerFilterNick", "checkerFilterResult"]) {
+  $(`#${id}`).addEventListener("change", (event) => {
+    const key = id.replace("checkerFilter", "").toLowerCase();
+    state.checkerFilters[key] = event.target.value;
+    if (!state.snapshot) return;
+    renderChecker(state.snapshot);
+  });
+}
+$("#clearCheckerFiltersBtn").addEventListener("click", () => {
+  state.checkerFilters = { search: "", category: "", status: "", enabled: "", nick: "", result: "" };
+  if (!state.snapshot) return;
+  renderChecker(state.snapshot);
+});
+$("#refreshCheckerLogBtn").addEventListener("click", () => loadCheckerLog().catch((error) => toast(error.message)));
+$("#clearCheckerLogBtn").addEventListener("click", () => clearCheckerLog().catch((error) => toast(error.message)));
 
 for (const button of $$(".tab-button")) {
   button.addEventListener("click", () => switchTab(button.dataset.tabTarget));
@@ -1627,5 +2253,6 @@ loadState().catch((error) => {
 
 window.setInterval(() => {
   if (document.hidden) return;
+  if (state.checkerBulkRunning) return;
   loadState().catch(() => {});
 }, 15000);
