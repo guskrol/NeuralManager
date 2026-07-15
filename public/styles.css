@@ -614,6 +614,17 @@ tr.account-banned td {
   border-bottom-color: rgba(251, 113, 133, 0.28);
 }
 
+tr.account-running.account-banned td,
+tr.account-banned.account-running td {
+  background: rgba(88, 214, 141, 0.14);
+  border-bottom-color: rgba(88, 214, 141, 0.26);
+}
+
+tr.account-running.account-banned,
+tr.account-banned.account-running {
+  outline-color: rgba(88, 214, 141, 0.4);
+}
+
 #checkerPanel th:first-child,
 #checkerPanel td:first-child {
   width: 44px;
@@ -669,8 +680,21 @@ tr.account-banned td {
   color: #6ff0a1;
 }
 
+.checker-pill.info {
+  border-color: rgba(56, 189, 248, 0.45);
+  background: rgba(56, 189, 248, 0.12);
+  color: var(--accent);
+}
+
+.checker-pill.warning {
+  border-color: rgba(251, 191, 36, 0.45);
+  background: rgba(251, 191, 36, 0.14);
+  color: #facc15;
+}
+
 .checker-pill.banned,
-.checker-pill.error {
+.checker-pill.error,
+.checker-pill.critical {
   border-color: rgba(251, 113, 133, 0.45);
   background: rgba(251, 113, 133, 0.16);
   color: var(--danger);
@@ -718,6 +742,148 @@ tr.account-banned td {
   font-size: 12px;
   line-height: 1.45;
   white-space: pre-wrap;
+}
+
+.ai-panel {
+  display: grid;
+  gap: 0;
+}
+
+.ai-control-grid {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.75fr) minmax(260px, 1.25fr);
+  gap: 12px;
+  padding: 16px;
+  border-top: 1px solid var(--line);
+  background: rgba(17, 22, 23, 0.48);
+}
+
+.ai-control-grid textarea {
+  resize: vertical;
+  min-height: 96px;
+}
+
+.ai-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 16px 16px;
+  background: rgba(17, 22, 23, 0.48);
+}
+
+.ai-result {
+  display: grid;
+  gap: 14px;
+  margin: 0 16px 16px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0b1113;
+}
+
+.ai-result.empty {
+  color: var(--muted);
+}
+
+.ai-result.severity-warning {
+  border-color: rgba(251, 191, 36, 0.35);
+}
+
+.ai-result.severity-critical {
+  border-color: rgba(251, 113, 133, 0.42);
+}
+
+.ai-result-header,
+.ai-meta-row,
+.ai-card-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.ai-result-header > div:first-child {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.ai-meta-row {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.ai-result-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.ai-result h3 {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.ai-card,
+.ai-account-row {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.ai-card p,
+.ai-next-question {
+  margin: 0;
+}
+
+.ai-card small,
+.ai-account-row small {
+  color: var(--muted);
+}
+
+.risk-badge {
+  padding: 3px 7px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.risk-low {
+  border-color: rgba(88, 214, 141, 0.35);
+  color: #6ff0a1;
+}
+
+.risk-medium {
+  border-color: rgba(251, 191, 36, 0.35);
+  color: #facc15;
+}
+
+.risk-high {
+  border-color: rgba(251, 113, 133, 0.35);
+  color: var(--danger);
+}
+
+.ai-account-list {
+  display: grid;
+  gap: 8px;
+}
+
+.ai-next-question {
+  padding: 10px;
+  border: 1px solid rgba(56, 189, 248, 0.28);
+  border-radius: 8px;
+  background: rgba(56, 189, 248, 0.08);
+  color: #c8ecff;
 }
 
 td:nth-child(2) {
@@ -1296,6 +1462,8 @@ td:nth-child(12) {
   .continuous-settings-grid,
   .task-grid,
   .status-grid,
+  .ai-control-grid,
+  .ai-result-grid,
   .log-line,
   .split {
     grid-template-columns: 1fr;

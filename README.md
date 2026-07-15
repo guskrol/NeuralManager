@@ -2,7 +2,7 @@
 
 Painel local para controlar uma farm de contas Jagex no DreamBot, com cadastro de contas, categorias, proxies, launch individual, launch em fila, logs, diagnostico e tasks continuas.
 
-Versao atual: `0.2.91`
+Versao atual: `0.2.94`
 
 ## Visao geral
 
@@ -26,8 +26,9 @@ Principais funcionalidades:
 - Aba Processos dedicada para logs e controle de processos.
 - Logs do launcher, stderr e DreamBot por processo.
 - Log dedicado do Checker em `data/logs/checker.log`.
+- Aba AI Analyst para analisar logs/status com LLM via OpenAI.
 - Continuous Tasks para relancar contas automaticamente por categoria.
-- Suporte inicial para escolher DreamBot ou TRiBot por conta.
+- Suporte inicial para escolher DreamBot, TRiBot ou EpicBot por conta.
 - Webhook Discord para notificacoes de rotina/processos.
 - Diagnostico do setup.
 - Aba Diagnóstico dedicada para avisos e erros de setup.
@@ -93,13 +94,22 @@ Use o modo rede apenas em rede confiavel. O painel local nao deve ser exposto pu
 A aba `Config` concentra as configuracoes globais:
 
 - Caminho do `Launcher.jar` do DreamBot.
+- Caminho do `TRiBot CLI`.
+- Caminho do `EpicBot-NXT.exe`.
 - Script padrao.
 - World padrao.
 - Maximo de instancias simultaneas.
 - Delay entre launches.
 - Opcoes de login Jagex/browser.
+- Configuracoes do AI Analyst, incluindo modelo e OpenAI API key.
 
 O caminho do `Launcher.jar` precisa apontar para o arquivo real do DreamBot no PC atual. Ao mover o projeto para outro computador, essa e a primeira configuracao que deve ser revisada.
+
+Para EpicBot, configure o campo `EpicBot CLI` apontando para o executavel `EpicBot-NXT.exe`.
+
+Para usar o `AI Analyst`, ative a opcao na aba `Config`, preencha a `OpenAI API key` e escolha o modelo. O padrao sugerido e `gpt-5.6-luna`, mas o campo e livre para trocar por outro modelo compativel com a Responses API.
+
+A chave da OpenAI fica salva somente no `data/farm.json` local. Ela nao aparece no snapshot enviado ao frontend; o painel mostra apenas se a chave esta configurada ou nao.
 
 ## Aba Adicionar contas
 
@@ -165,6 +175,7 @@ Cada linha mostra:
 - World.
 - Proxy.
 - Botao de resumo/log.
+- Seletor do executor: DreamBot, TRiBot ou EpicBot.
 - Botao de lixeira para excluir a conta.
 - Botao `Launch`.
 
@@ -174,7 +185,9 @@ Use `Notes` para identificar rapidamente o objetivo ou estado manual da conta, p
 
 Use `Char name` para informar o nome do personagem no OSRS. O botao `Stats` busca os niveis no HiScores oficial, mostra um painel compacto com skills, total level e combat calculado, e guarda cache local por ate 30 minutos.
 
-O campo `Schedule` e opcional. Quando ele estiver preenchido, o painel usa o QuickStart do DreamBot com `-schedule=<nome>` e ignora `Script`/`ARG` naquele launch. O nome precisa ser exatamente igual ao schedule salvo no DreamBot. Quando `Schedule` estiver vazio, o launch continua usando `-script` e `-params` normalmente.
+O campo `Schedule` e opcional. No DreamBot, quando ele estiver preenchido, o painel usa o QuickStart com `-schedule=<nome>` e ignora `Script`/`ARG` naquele launch. No EpicBot, esse campo e enviado como `--schedule-id`. Quando `Schedule` estiver vazio, o launch usa `Script` normalmente.
+
+No EpicBot, preencha `Script` com o nome aceito pela CLI, por exemplo um nome `SDN-...` ou `LOCAL-...`. O campo `ARG` e enviado como `--script-profile`, entao use-o para o caminho do arquivo de profile/settings JSON quando o script EpicBot exigir profile.
 
 Quando uma conta esta online, a linha ganha destaque verde. O painel detecta o processo real do DreamBot mesmo quando o launcher inicial fecha e o cliente Java fica rodando em outro PID.
 
@@ -207,6 +220,8 @@ O comando inclui:
 - Conta.
 - Proxy, quando configurado.
 - Login Jagex/browser quando habilitado.
+
+Para EpicBot, o painel chama o `EpicBot-NXT.exe` configurado na aba `Config` e monta os parametros CLI com conta Jagex, TOTP, world, script/schedule e proxy.
 
 Na aba `Config`, `Debug Jagex login` registra respostas relevantes do browser de login em `data/logs/jagex-debug-YYYY-MM-DD.log`. Use apenas para teste: o painel mascara campos sensiveis e tenta detectar candidatos a display name/char name.
 
@@ -299,6 +314,59 @@ data/logs/checker.log
 
 Use esse log quando a fila parecer travada. Ele indica em qual conta e etapa o checker parou.
 
+## Aba AI Analyst
+
+A aba `AI Analyst` usa uma LLM via OpenAI para analisar o estado atual do painel.
+
+Ela monta um contexto com:
+
+- resumo das contas e categorias;
+- status de saude e checker;
+- launches ativos e recentes;
+- trecho recente de `data/logs/checker.log`;
+- trechos recentes dos logs de launch, stderr e DreamBot quando habilitado.
+
+Antes de enviar o contexto para a OpenAI, o backend aplica redaction em dados sensiveis:
+
+- senhas;
+- TOTP/secret;
+- session/access/refresh tokens;
+- proxy password;
+- webhooks do Discord;
+- emails completos.
+
+Modos de analise:
+
+- `Painel geral`: analisa a situacao geral do manager.
+- `Checker`: foca na fila, bans, timeouts e capturas.
+- `Conta especifica`: envia contexto reduzido de uma conta selecionada.
+
+A resposta volta em JSON estruturado e a UI mostra:
+
+- severidade;
+- resumo;
+- confianca;
+- achados com evidencias;
+- acoes sugeridas com nivel de risco;
+- contas afetadas;
+- uma pergunta de follow-up quando fizer sentido.
+
+O AI Analyst nao executa nenhuma acao automaticamente. Ele apenas recomenda proximos passos para o usuario confirmar manualmente.
+
+### Custo e privacidade
+
+Cada clique em `Analisar agora` faz uma chamada para a API da OpenAI e pode gerar custo de tokens na conta configurada. O painel nao roda analises em loop e nao envia nada automaticamente: o usuario decide quando executar a analise.
+
+Para reduzir exposicao de dados sensiveis, o backend monta um contexto reduzido e aplica mascaramento antes de enviar para a OpenAI. Mesmo assim, use a feature com criterio: logs podem conter informacoes operacionais da farm, nomes de scripts, categorias, status de contas e trechos de erro.
+
+Boas praticas:
+
+- mantenha a OpenAI API key apenas no computador do agent;
+- nao comite a pasta `data/`;
+- limpe logs antigos quando nao precisar mais deles;
+- revise os logs antes de analisar se houver informacao extremamente sensivel;
+- trate as sugestoes da IA como apoio de diagnostico, nao como decisao automatica.
+
 ## Aba Proxy
 
 Use a aba `Proxy` para cadastrar proxies e depois associa-los as contas.
@@ -354,7 +422,7 @@ Campos principais:
 - Cooldown por conta.
 - Status ativa ou pausada.
 
-Se a task tiver `Schedule` preenchido, o continuous usa o schedule do DreamBot para as contas daquela categoria. Se `Schedule` estiver vazio, usa `Script` e `ARG` como antes.
+Se a task tiver `Schedule` preenchido, o continuous usa o schedule do executor selecionado para aquela conta. No DreamBot isso vira `-schedule=<nome>`; no EpicBot isso vira `--schedule-id <nome>`. Se `Schedule` estiver vazio, usa `Script` e `ARG` como antes.
 
 O loop faz o seguinte:
 
@@ -403,6 +471,8 @@ Se o login travar, abra o resumo do processo e confira essas linhas primeiro.
 ## Captura automatica de nick
 
 O painel consegue tentar preencher o nick/char name da conta automaticamente.
+
+Atualmente essa captura automatica e especifica do DreamBot. Para TRiBot e EpicBot, o painel faz o launch, mas nao roda o helper `NeuraL Nick Capture v2`.
 
 Para isso, o projeto inclui um script helper do DreamBot:
 

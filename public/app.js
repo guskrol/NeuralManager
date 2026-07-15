@@ -11,6 +11,7 @@ const state = {
   checkerBulkCancelRequested: false,
   currentCheckerIndex: null,
   isLoadingState: false,
+  aiAnalysis: null,
   accountFilters: {
     search: "",
     category: "",
@@ -83,6 +84,7 @@ async function writeCheckerLog(message, details = {}) {
 function fillSettings(config) {
   $("#launcherPath").value = config.launcherPath || "";
   $("#tribotCliPath").value = config.tribotCliPath || "";
+  $("#epicBotPath").value = config.epicBotPath || "";
   $("#defaultScriptName").value = config.defaultScriptName || "";
   $("#defaultWorld").value = config.defaultWorld || 301;
   $("#maxInstances").value = config.maxInstances || 1;
@@ -95,6 +97,14 @@ function fillSettings(config) {
   $("#discordWebhookEnabled").checked = Boolean(config.discordWebhook?.enabled);
   $("#discordNotifyOnStop").checked = config.discordWebhook?.notifyOnStop !== false;
   $("#discordIncludeLogTail").checked = config.discordWebhook?.includeLogTail !== false;
+  $("#aiEnabled").checked = Boolean(config.ai?.enabled);
+  $("#aiModel").value = config.ai?.model || "gpt-5.6-luna";
+  $("#aiOpenAiApiKey").value = "";
+  $("#aiClearOpenAiApiKey").checked = false;
+  $("#aiIncludeCheckerLog").checked = config.ai?.includeCheckerLog !== false;
+  $("#aiIncludeLaunchLogs").checked = config.ai?.includeLaunchLogs !== false;
+  const keyStatus = $("#aiKeyStatus");
+  if (keyStatus) keyStatus.textContent = config.ai?.apiKeyConfigured ? "Chave configurada." : "Chave não configurada.";
 }
 
 function renderVersion(version) {
@@ -117,6 +127,125 @@ function renderMachineUsage(performance) {
   node.innerHTML = `
     <span>CPU <strong>${machine.cpuPercent || 0}%</strong></span>
     <span>RAM <strong>${machine.memoryPercent || 0}%</strong></span>
+  `;
+}
+
+function renderAiControls(snapshot) {
+  const config = snapshot?.config?.ai || {};
+  const status = $("#aiConfigStatus");
+  if (status) {
+    if (!config.enabled) {
+      status.textContent = "AI Analyst desativado na aba Config.";
+    } else if (!config.apiKeyConfigured) {
+      status.textContent = "OpenAI API key não configurada.";
+    } else {
+      status.textContent = `Pronto · ${config.model || "modelo padrão"}`;
+    }
+  }
+
+  const accountSelect = $("#aiAccountIndex");
+  if (accountSelect) {
+    const previous = accountSelect.value;
+    const accountsByIndex = new Map((snapshot.accounts || []).map((account) => [Number(account.index), account]));
+    accountSelect.innerHTML = `<option value="">Nenhuma</option>`;
+    for (const row of snapshot.rows || []) {
+      const account = accountsByIndex.get(Number(row.index));
+      const label = [
+        `index ${row.index}`,
+        account?.email || "",
+        row.charName ? `Nick: ${row.charName}` : "",
+      ].filter(Boolean).join(" · ");
+      accountSelect.insertAdjacentHTML("beforeend", `<option value="${escapeHtml(String(row.index))}">${escapeHtml(label)}</option>`);
+    }
+    accountSelect.value = [...accountSelect.options].some((option) => option.value === previous) ? previous : "";
+  }
+
+  const scope = $("#aiAnalysisScope")?.value || "panel";
+  if (accountSelect) accountSelect.disabled = scope !== "account";
+  renderAiAnalysisResult(state.aiAnalysis);
+}
+
+function severityLabel(value) {
+  return {
+    ok: "OK",
+    info: "Info",
+    warning: "Atenção",
+    critical: "Crítico",
+  }[value] || "Info";
+}
+
+function riskLabel(value) {
+  return {
+    low: "baixo",
+    medium: "médio",
+    high: "alto",
+  }[value] || "médio";
+}
+
+function renderAiAnalysisResult(result) {
+  const node = $("#aiAnalysisResult");
+  if (!node) return;
+  if (!result) {
+    node.className = "ai-result empty";
+    node.textContent = "Nenhuma análise executada ainda.";
+    return;
+  }
+
+  const analysis = result.analysis || {};
+  const usage = result.usage || {};
+  node.className = `ai-result severity-${escapeHtml(analysis.severity || "info")}`;
+  node.innerHTML = `
+    <div class="ai-result-header">
+      <div>
+        <span class="checker-pill ${escapeHtml(analysis.severity || "info")}">${escapeHtml(severityLabel(analysis.severity))}</span>
+        <strong>${escapeHtml(analysis.summary || "Sem resumo.")}</strong>
+      </div>
+      <span class="muted-text">${escapeHtml(result.model || "")} · ${escapeHtml(formatDateTime(result.createdAt))}</span>
+    </div>
+    <div class="ai-meta-row">
+      <span>Confiança: ${Math.round(Number(analysis.confidence || 0) * 100)}%</span>
+      <span>Contexto: ${escapeHtml(String(result.contextMeta?.accounts || 0))} conta(s), ${escapeHtml(String(result.contextMeta?.logSections || 0))} log(s)</span>
+      ${usage.total_tokens ? `<span>Tokens: ${escapeHtml(String(usage.total_tokens))}</span>` : ""}
+    </div>
+    <div class="ai-result-grid">
+      <section>
+        <h3>Achados</h3>
+        ${(analysis.keyFindings || []).length ? analysis.keyFindings.map((item) => `
+          <article class="ai-card">
+            <strong>${escapeHtml(item.title)}</strong>
+            <p>${escapeHtml(item.detail)}</p>
+            <small>${escapeHtml(item.evidence)}</small>
+          </article>
+        `).join("") : `<p class="muted-text">Nenhum achado relevante.</p>`}
+      </section>
+      <section>
+        <h3>Ações sugeridas</h3>
+        ${(analysis.suggestedActions || []).length ? analysis.suggestedActions.map((item) => `
+          <article class="ai-card">
+            <div class="ai-card-title">
+              <strong>${escapeHtml(item.label)}</strong>
+              <span class="risk-badge risk-${escapeHtml(item.risk || "medium")}">risco ${escapeHtml(riskLabel(item.risk))}</span>
+            </div>
+            <p>${escapeHtml(item.reason)}</p>
+          </article>
+        `).join("") : `<p class="muted-text">Nenhuma ação sugerida.</p>`}
+      </section>
+    </div>
+    ${(analysis.affectedAccounts || []).length ? `
+      <section class="ai-affected">
+        <h3>Contas citadas</h3>
+        <div class="ai-account-list">
+          ${analysis.affectedAccounts.map((item) => `
+            <div class="ai-account-row">
+              <strong>#${escapeHtml(String(item.index))} ${escapeHtml(item.email || "")}</strong>
+              <span>${escapeHtml(item.charName || "-")} · ${escapeHtml(item.status || "-")}</span>
+              <small>${escapeHtml(item.reason || "")}</small>
+            </div>
+          `).join("")}
+        </div>
+      </section>
+    ` : ""}
+    ${analysis.nextQuestion ? `<p class="ai-next-question">${escapeHtml(analysis.nextQuestion)}</p>` : ""}
   `;
 }
 
@@ -238,8 +367,9 @@ function renderAccounts(snapshot) {
     const totalLevel = Number(checkerResult?.totalLevel || 0) > 0 ? checkerResult.totalLevel : "-";
     const summary = buildAccountSummary({ account, row, activity });
     const tr = document.createElement("tr");
-    tr.classList.toggle("account-running", activity.health === "online");
-    tr.classList.toggle("account-banned", checkerResult?.status === "banned");
+    const isRunning = activity.health === "online";
+    tr.classList.toggle("account-running", isRunning);
+    tr.classList.toggle("account-banned", !isRunning && checkerResult?.status === "banned");
     tr.dataset.index = row.index;
     tr.innerHTML = `
       <td><input class="row-selected account-select-checkbox" type="checkbox" aria-label="Selecionar conta" ${state.selectedAccountIndexes.has(Number(row.index)) ? "checked" : ""} /></td>
@@ -279,8 +409,9 @@ function renderAccounts(snapshot) {
       <td>
         <div class="row-actions">
           <select class="row-launch-client" aria-label="Executor do launch">
-            <option value="dreambot">DreamBot</option>
-            <option value="tribot">TRiBot</option>
+            <option value="dreambot" ${row.botClient === "dreambot" ? "selected" : ""}>DreamBot</option>
+            <option value="tribot" ${row.botClient === "tribot" ? "selected" : ""}>TRiBot</option>
+            <option value="epicbot" ${row.botClient === "epicbot" ? "selected" : ""}>EpicBot</option>
           </select>
           <button class="primary launch-row" type="button">Launch</button>
           <button class="icon-button danger delete-account" type="button" aria-label="Excluir conta" title="Excluir conta">🗑</button>
@@ -344,8 +475,9 @@ function renderChecker(snapshot) {
     const summary = buildAccountSummary({ account, row, activity });
     const totalLevel = Number(result?.totalLevel || 0) > 0 ? result.totalLevel : "-";
     const tr = document.createElement("tr");
-    tr.classList.toggle("account-running", activity.health === "online");
-    tr.classList.toggle("account-banned", result?.status === "banned");
+    const isRunning = activity.health === "online";
+    tr.classList.toggle("account-running", isRunning);
+    tr.classList.toggle("account-banned", !isRunning && result?.status === "banned");
     tr.dataset.index = row.index;
     tr.innerHTML = `
       <td><input class="checker-row-selected account-select-checkbox" type="checkbox" aria-label="Selecionar conta no checker" ${state.selectedCheckerIndexes.has(Number(row.index)) ? "checked" : ""} /></td>
@@ -1154,6 +1286,7 @@ async function loadState() {
     fillSettings(snapshot.config);
     renderAccounts(snapshot);
     renderChecker(snapshot);
+    renderAiControls(snapshot);
     renderProxies(snapshot.proxies);
     renderLaunches(snapshot.launches);
     renderContinuous(snapshot);
@@ -1177,6 +1310,7 @@ async function saveSettings(event) {
     body: JSON.stringify({
       launcherPath: $("#launcherPath").value,
       tribotCliPath: $("#tribotCliPath").value,
+      epicBotPath: $("#epicBotPath").value,
       defaultScriptName: $("#defaultScriptName").value,
       defaultWorld: Number($("#defaultWorld").value),
       maxInstances: Number($("#maxInstances").value),
@@ -1189,6 +1323,12 @@ async function saveSettings(event) {
       discordWebhookEnabled: $("#discordWebhookEnabled").checked,
       discordNotifyOnStop: $("#discordNotifyOnStop").checked,
       discordIncludeLogTail: $("#discordIncludeLogTail").checked,
+      aiEnabled: $("#aiEnabled").checked,
+      aiModel: $("#aiModel").value,
+      aiOpenAiApiKey: $("#aiOpenAiApiKey").value,
+      aiClearOpenAiApiKey: $("#aiClearOpenAiApiKey").checked,
+      aiIncludeCheckerLog: $("#aiIncludeCheckerLog").checked,
+      aiIncludeLaunchLogs: $("#aiIncludeLaunchLogs").checked,
     }),
   });
   toast("Configuração salva.");
@@ -1385,6 +1525,7 @@ function rowPayload(tr) {
     world: Number(tr.querySelector(".row-world").value),
     worldMode: tr.querySelector(".row-world-mode").value,
     proxyId: tr.querySelector(".row-proxy").value,
+    botClient: tr.querySelector(".row-launch-client")?.value || "dreambot",
     enabled: existingRow?.enabled !== false,
   };
 }
@@ -1427,6 +1568,35 @@ async function checkAccount(index) {
   await loadState();
 }
 
+async function runAiAnalysis() {
+  const button = $("#runAiAnalysisBtn");
+  const previousText = button?.textContent || "Analisar agora";
+  try {
+    if (button) {
+      button.disabled = true;
+      button.textContent = "Analisando...";
+    }
+    const scope = $("#aiAnalysisScope").value;
+    const accountIndex = $("#aiAccountIndex").value;
+    const result = await api("/api/ai/analyze", {
+      method: "POST",
+      body: JSON.stringify({
+        scope,
+        index: scope === "account" && accountIndex !== "" ? Number(accountIndex) : undefined,
+        prompt: $("#aiPrompt").value,
+      }),
+    });
+    state.aiAnalysis = result;
+    renderAiAnalysisResult(result);
+    toast("Análise concluída.");
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = previousText;
+    }
+  }
+}
+
 async function launchRowByIndex(index) {
   const tr = $(`#accountsBody tr[data-index="${index}"]`);
   if (tr) {
@@ -1449,6 +1619,7 @@ async function launchRowByIndex(index) {
       world: row.world,
       worldMode: row.worldMode,
       proxyId: row.proxyId,
+      botClient: row.botClient || "dreambot",
       enabled: row.enabled,
     }),
   });
@@ -2241,6 +2412,12 @@ $("#clearCheckerFiltersBtn").addEventListener("click", () => {
 });
 $("#refreshCheckerLogBtn").addEventListener("click", () => loadCheckerLog().catch((error) => toast(error.message)));
 $("#clearCheckerLogBtn").addEventListener("click", () => clearCheckerLog().catch((error) => toast(error.message)));
+$("#runAiAnalysisBtn").addEventListener("click", () => runAiAnalysis().catch((error) => toast(error.message)));
+$("#clearAiAnalysisBtn").addEventListener("click", () => {
+  state.aiAnalysis = null;
+  renderAiAnalysisResult(null);
+});
+$("#aiAnalysisScope").addEventListener("change", () => renderAiControls(state.snapshot || {}));
 
 for (const button of $$(".tab-button")) {
   button.addEventListener("click", () => switchTab(button.dataset.tabTarget));

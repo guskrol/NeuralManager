@@ -18,6 +18,7 @@ const statePath = join(dataDir, "web-farm-state.json");
 const logsDir = join(dataDir, "logs");
 const checkerLogPath = join(logsDir, "checker.log");
 const versionPath = join(rootDir, "VERSION");
+const openAiResponsesEndpoint = "https://api.openai.com/v1/responses";
 const dreamBotLogsDir = join(process.env.USERPROFILE || "", "DreamBot", "Logs");
 const dreamBotScriptsDir = join(process.env.USERPROFILE || "", "DreamBot", "Scripts");
 const nickCaptureScriptName = "NeuraL Nick Capture v2";
@@ -180,15 +181,24 @@ async function readConfig() {
     return {
       launcherPath: "C:\\Users\\gusta\\DreamBot\\Launcher.jar",
       tribotCliPath: "",
+      epicBotPath: "",
       accountsFile: ".\\data\\accounts.txt",
       defaultScriptName: "Teste",
       defaultWorld: 301,
-    useGeneratedTotp: false,
-    useJagexBrowserLogin: true,
-    jagexDebug: false,
-    useStoredGameAccount: false,
+      useGeneratedTotp: false,
+      useJagexBrowserLogin: true,
+      jagexDebug: false,
+      useStoredGameAccount: false,
       launchDelaySeconds: 20,
       maxInstances: 2,
+      ai: {
+        enabled: false,
+        provider: "openai",
+        openAiApiKey: "",
+        model: "gpt-5.6-luna",
+        includeCheckerLog: true,
+        includeLaunchLogs: true,
+      },
       proxies: [],
       accounts: [],
       categories: ["default"],
@@ -206,6 +216,7 @@ async function readConfig() {
   if (!Array.isArray(config.categories)) config.categories = [];
   if (!config.continuous || typeof config.continuous !== "object") config.continuous = {};
   if (!Array.isArray(config.continuousTasks)) config.continuousTasks = [];
+  if (!config.ai || typeof config.ai !== "object") config.ai = {};
   return config;
 }
 
@@ -226,16 +237,65 @@ function normalizeCheckerState(checker) {
   if (!checker || typeof checker !== "object") return {};
   return Object.fromEntries(Object.entries(checker).map(([key, value]) => {
     if (!value || typeof value !== "object") return [key, value];
+    const totalLevel = Number(value.totalLevel || 0);
+    const hasHiscoreEvidence = totalLevel > 0 || value.status === "ok";
     return [
       key,
       {
         ...value,
+        status: hasHiscoreEvidence ? "ok" : value.status,
+        totalLevel: totalLevel > 0 ? totalLevel : value.totalLevel,
         message: String(value.message || "").replace(/\b[Dd]etectido\b/g, (match) =>
           match[0] === "D" ? "Detectado" : "detectado"
         ),
       },
     ];
   }));
+}
+
+function checkerHasHiscoreEvidence(result, row, hiscores = {}) {
+  if (!result || typeof result !== "object") return false;
+  if (result.status === "ok") return true;
+  if (Number(result.totalLevel || 0) > 0) return true;
+  const names = [
+    result.charName,
+    row?.charName,
+    row?.accountNickname,
+    row?.jagexDisplayName,
+  ].map((value) => normalizePlayerName(value).toLowerCase()).filter(Boolean);
+  return names.some((name) => Number(hiscores?.[name]?.totalLevel || 0) > 0);
+}
+
+function sanitizeCheckerStateAgainstHiscores(checker, rows = [], hiscores = {}) {
+  if (!checker || typeof checker !== "object") return { checker: {}, changed: false };
+  const rowByIndex = new Map(rows.map((row) => [Number(row.index), row]));
+  let changed = false;
+  const normalized = {};
+
+  for (const [key, value] of Object.entries(checker)) {
+    if (!value || typeof value !== "object") {
+      normalized[key] = value;
+      continue;
+    }
+
+    if (value.status === "banned" && checkerHasHiscoreEvidence(value, rowByIndex.get(Number(key)), hiscores)) {
+      changed = true;
+      const charName = normalizePlayerName(value.charName || rowByIndex.get(Number(key))?.charName || "");
+      const cached = hiscores?.[charName.toLowerCase()];
+      normalized[key] = {
+        ...value,
+        status: "ok",
+        message: "Conta encontrada no HiScores. Status banido antigo corrigido.",
+        charName: charName || value.charName || "",
+        totalLevel: Number(value.totalLevel || cached?.totalLevel || 0) || value.totalLevel,
+        combatLevel: Number(value.combatLevel || cached?.combatLevel || 0) || value.combatLevel,
+      };
+    } else {
+      normalized[key] = value;
+    }
+  }
+
+  return { checker: normalized, changed };
 }
 
 async function readAppState() {
@@ -562,9 +622,58 @@ function normalizeDiscordWebhookConfig(config) {
   };
 }
 
+function normalizeAiConfig(config = {}) {
+  const value = config.ai && typeof config.ai === "object" ? config.ai : {};
+  return {
+    enabled: Boolean(value.enabled),
+    provider: "openai",
+    openAiApiKey: String(value.openAiApiKey || process.env.OPENAI_API_KEY || "").trim(),
+    model: String(value.model || process.env.OPENAI_MODEL || "gpt-5.6-luna").trim(),
+    includeCheckerLog: value.includeCheckerLog !== false,
+    includeLaunchLogs: value.includeLaunchLogs !== false,
+  };
+}
+
+function sanitizeAiConfig(config = {}) {
+  const ai = normalizeAiConfig(config);
+  return {
+    enabled: ai.enabled,
+    provider: ai.provider,
+    model: ai.model,
+    apiKeyConfigured: Boolean(ai.openAiApiKey),
+    includeCheckerLog: ai.includeCheckerLog,
+    includeLaunchLogs: ai.includeLaunchLogs,
+  };
+}
+
 function normalizeBotClient(value) {
   const clean = String(value || "").trim().toLowerCase();
-  return clean === "tribot" ? "tribot" : "dreambot";
+  if (clean === "tribot") return "tribot";
+  if (clean === "epicbot") return "epicbot";
+  return "dreambot";
+}
+
+function maskEmail(value) {
+  const email = String(value || "").trim();
+  const match = email.match(/^([^@\s]+)@([^@\s]+)$/);
+  if (!match) return mask(email);
+  const [, name, domain] = match;
+  const visible = name.slice(0, Math.min(3, name.length));
+  return `${visible}${"*".repeat(Math.min(8, Math.max(2, name.length - visible.length)))}@${domain}`;
+}
+
+function redactSensitiveText(text) {
+  return String(text || "")
+    .replace(/[A-Z2-7]{8,}/gi, (value) => (value.length >= 12 ? mask(value) : value))
+    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, (value) => maskEmail(value))
+    .replace(/(accountPassword|accountPass|password|pass|senha|totp|secret|sessionId|accessToken|refreshToken|proxyPass|webhook)(\s*[=:]\s*|\s+)(["']?)[^\s"']+/gi, (_match, key, sep, quote) => `${key}${sep}${quote}${mask("redacted")}`)
+    .replace(/https:\/\/discord\.com\/api\/webhooks\/[^\s"']+/gi, "https://discord.com/api/webhooks/***");
+}
+
+function truncateText(value, maxLength) {
+  const text = String(value || "");
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.floor(maxLength / 2))}\n...[trecho removido para caber no contexto]...\n${text.slice(-Math.floor(maxLength / 2))}`;
 }
 
 function resolveTribotCliPath(config = {}) {
@@ -573,6 +682,19 @@ function resolveTribotCliPath(config = {}) {
     process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, "Tribot", "tribot-x.exe") : "",
     process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, "org.tribot.x", "tribot-x.exe") : "",
     process.env.ProgramFiles ? join(process.env.ProgramFiles, "Tribot", "tribot-x.exe") : "",
+  ].filter(Boolean);
+
+  return candidates.find((candidate) => existsSync(candidate)) || "";
+}
+
+function resolveEpicBotPath(config = {}) {
+  const candidates = [
+    String(config.epicBotPath || "").trim(),
+    process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, "EpicBot", "EpicBot-NXT.exe") : "",
+    process.env.ProgramFiles ? join(process.env.ProgramFiles, "EpicBot", "EpicBot-NXT.exe") : "",
+    process.env["ProgramFiles(x86)"] ? join(process.env["ProgramFiles(x86)"], "EpicBot", "EpicBot-NXT.exe") : "",
+    process.env.USERPROFILE ? join(process.env.USERPROFILE, "EpicBot", "EpicBot-NXT.exe") : "",
+    process.env.USERPROFILE ? join(process.env.USERPROFILE, "Downloads", "EpicBot-NXT.exe") : "",
   ].filter(Boolean);
 
   return candidates.find((candidate) => existsSync(candidate)) || "";
@@ -745,10 +867,51 @@ function buildTribotArgs({ account, row, config }) {
   return args;
 }
 
+function buildEpicBotArgs({ account, row, config }) {
+  const totp = String(account.totpSecret || "").trim();
+  const proxies = normalizeProxies(config);
+  const proxy = proxies.find((item) => item.enabled && item.id === normalizeProxyId(row.proxyId));
+  const args = [];
+  const scheduleName = String(row.scheduleName || "").trim();
+  const scriptName = String(row.scriptName || config.defaultScriptName || "").trim();
+  const charName = normalizePlayerName(row.charName || row.jagexDisplayName || row.accountNickname || "");
+  const hasJagexSession = Boolean(row.jagexSessionId && row.jagexCharacterId);
+
+  if (hasJagexSession) {
+    args.push("--jagex-session-id", row.jagexSessionId, "--jagex-character-id", row.jagexCharacterId);
+  } else {
+    args.push("--jagex-email", account.email, "--jagex-password", account.password);
+    if (totp) args.push("--jagex-totp", totp);
+    if (charName) args.push("--jagex-character", charName);
+  }
+
+  if (scheduleName) {
+    args.push("--schedule-id", scheduleName);
+  } else if (scriptName) {
+    args.push("--script-name", scriptName);
+    if (Array.isArray(row.scriptParams) && row.scriptParams.length) {
+      args.push("--script-profile", row.scriptParams.join(" "));
+    }
+  }
+
+  if (String(row.worldMode || "fixed") === "fixed" && Number(row.world || config.defaultWorld || 0)) {
+    args.push("--world", String(row.world || config.defaultWorld));
+  }
+
+  if (proxy) {
+    args.push("--proxy-host", proxy.host, "--proxy-port", String(proxy.port));
+    if (proxy.username) args.push("--proxy-username", proxy.username);
+    if (proxy.password) args.push("--proxy-password", proxy.password);
+  }
+
+  return args;
+}
+
 function buildArgs({ account, row, config, remoteDebuggingPort = 0 }) {
-  return normalizeBotClient(row.botClient) === "tribot"
-    ? buildTribotArgs({ account, row, config })
-    : buildDreamBotArgs({ account, row, config, remoteDebuggingPort });
+  const botClient = normalizeBotClient(row.botClient);
+  if (botClient === "tribot") return buildTribotArgs({ account, row, config });
+  if (botClient === "epicbot") return buildEpicBotArgs({ account, row, config });
+  return buildDreamBotArgs({ account, row, config, remoteDebuggingPort });
 }
 
 function buildSafeArgs({ account, row, config, remoteDebuggingPort = 0 }) {
@@ -757,16 +920,20 @@ function buildSafeArgs({ account, row, config, remoteDebuggingPort = 0 }) {
     "-accountPassword",
     "-accountPass",
     "-accountTotp",
+    "-sessionId",
+    "-accessToken",
+    "-refreshToken",
+    "--jagex-password",
+    "--jagex-totp",
+    "--jagex-session-id",
     "--legacy-password-raw",
     "--legacy-totp-raw",
     "-proxyPass",
     "-proxyPassArg",
     "--proxy-password-raw",
-    "-sessionId",
-    "-accessToken",
-    "-refreshToken",
-  ]);
-  return args.map((arg, index) => (sensitive.has(args[index - 1]) ? mask(String(arg)) : arg));
+    "--proxy-password",
+  ].map((item) => item.toLowerCase()));
+  return args.map((arg, index) => (sensitive.has(String(args[index - 1] || "").toLowerCase()) ? mask(String(arg)) : arg));
 }
 
 function formatCommandPreview(args) {
@@ -1206,6 +1373,7 @@ function sanitizeConfig(config) {
   return {
     launcherPath: config.launcherPath,
     tribotCliPath: config.tribotCliPath || resolveTribotCliPath(config),
+    epicBotPath: config.epicBotPath || resolveEpicBotPath(config),
     defaultScriptName: config.defaultScriptName,
     defaultWorld: config.defaultWorld,
     useGeneratedTotp: Boolean(config.useGeneratedTotp),
@@ -1215,6 +1383,7 @@ function sanitizeConfig(config) {
     launchDelaySeconds: Number(config.launchDelaySeconds || 0),
     maxInstances: Number(config.maxInstances || 1),
     discordWebhook: normalizeDiscordWebhookConfig(config),
+    ai: sanitizeAiConfig(config),
     continuous: normalizeContinuousConfig(config),
   };
 }
@@ -1297,6 +1466,10 @@ async function getSnapshot() {
   const previousLaunchesJson = JSON.stringify(appState.launches || []);
   const previousCheckerJson = JSON.stringify(appState.checker || {});
   const previousNotificationsJson = JSON.stringify(appState.discordNotifications || {});
+  const sanitizedChecker = sanitizeCheckerStateAgainstHiscores(appState.checker || {}, rows, appState.hiscores || {});
+  if (sanitizedChecker.changed) {
+    appState.checker = sanitizedChecker.checker;
+  }
   const javaProcesses = await getJavaProcesses();
   const performance = await getPerformanceDiagnostics();
   const alive = await reconcileLaunches(appState.launches, javaProcesses);
@@ -1306,6 +1479,8 @@ async function getSnapshot() {
     const index = Number(launch.index);
     if (!Number.isInteger(index)) continue;
     const previous = appState.checker?.[index];
+    const row = rows.find((item) => Number(item.index) === index);
+    if (checkerHasHiscoreEvidence(previous, row, appState.hiscores || {})) continue;
     const checkedAt = launch.banDetectedAt || launch.completedAt || previous?.checkedAt || new Date().toISOString();
     appState.checker = {
       ...(appState.checker || {}),
@@ -1542,7 +1717,7 @@ $rows | ConvertTo-Json -Compress
 async function queryJavaProcesses() {
   if (process.platform !== "win32") return [];
   try {
-    const command = "$ErrorActionPreference='SilentlyContinue'; Get-CimInstance Win32_Process | Where-Object { $_.Name -in @('java.exe','javaw.exe') } | Select-Object @{Name='Id';Expression={$_.ProcessId}},@{Name='ProcessName';Expression={$_.Name}},@{Name='StartTime';Expression={$_.CreationDate}},@{Name='Path';Expression={$_.ExecutablePath}},CommandLine | ConvertTo-Json -Compress; exit 0";
+    const command = "$ErrorActionPreference='SilentlyContinue'; Get-CimInstance Win32_Process | Where-Object { $_.Name -in @('java.exe','javaw.exe','EpicBot-NXT.exe','EpicBot.exe') -or $_.CommandLine -match '(?i)EpicBot' -or $_.ExecutablePath -match '(?i)EpicBot' } | Select-Object @{Name='Id';Expression={$_.ProcessId}},@{Name='ProcessName';Expression={$_.Name}},@{Name='StartTime';Expression={$_.CreationDate}},@{Name='Path';Expression={$_.ExecutablePath}},CommandLine | ConvertTo-Json -Compress; exit 0";
     const { stdout } = await execFileAsync("powershell.exe", ["-NoProfile", "-Command", command], {
       windowsHide: true,
       timeout: 5000,
@@ -1567,7 +1742,7 @@ async function queryJavaProcesses() {
 
 async function getJavaProcessesBasic() {
   try {
-    const command = "$ErrorActionPreference='SilentlyContinue'; Get-Process -Name java,javaw | Select-Object Id,ProcessName,StartTime,Path | ConvertTo-Json -Compress; exit 0";
+    const command = "$ErrorActionPreference='SilentlyContinue'; Get-Process -Name java,javaw,EpicBot-NXT,EpicBot | Select-Object Id,ProcessName,StartTime,Path | ConvertTo-Json -Compress; exit 0";
     const { stdout } = await execFileAsync("powershell.exe", ["-NoProfile", "-Command", command], {
       windowsHide: true,
       timeout: 5000,
@@ -1679,6 +1854,27 @@ function isDreamBotClientProcess(processInfo) {
     || /^DreamBot\b/i.test(processInfo.windowTitle || "");
 }
 
+function isEpicBotClientProcess(processInfo) {
+  return /epicbot/i.test(processInfo?.processName || "")
+    || /epicbot/i.test(processInfo?.path || "")
+    || /epicbot/i.test(processInfo?.commandLine || "")
+    || /^EpicBot\b/i.test(processInfo?.windowTitle || "");
+}
+
+function isTribotClientProcess(processInfo) {
+  return /tribot/i.test(processInfo?.processName || "")
+    || /tribot/i.test(processInfo?.path || "")
+    || /tribot/i.test(processInfo?.commandLine || "")
+    || /^TRiBot\b/i.test(processInfo?.windowTitle || "");
+}
+
+function isLaunchClientProcess(processInfo, launch = {}) {
+  const botClient = normalizeBotClient(launch.botClient);
+  if (botClient === "epicbot") return isEpicBotClientProcess(processInfo);
+  if (botClient === "tribot") return isTribotClientProcess(processInfo);
+  return isDreamBotClientProcess(processInfo);
+}
+
 function launchClientMatchScore(processInfo, launch) {
   const title = String(processInfo?.windowTitle || "");
   const commandLine = String(processInfo?.commandLine || "");
@@ -1743,8 +1939,25 @@ function getCommandLineHint(commandLine) {
 
 function redactCommandLine(commandLine) {
   const args = parseCommandLineArgs(commandLine);
-  const sensitive = new Set(["-accountPassword", "-accountPass", "-accountTotp", "-proxyPass", "-proxyPassArg", "-sessionId", "-accessToken", "-refreshToken"]);
-  return args.map((arg, index) => (sensitive.has(args[index - 1]) ? mask(String(arg)) : arg)).join(" ");
+  const sensitive = new Set([
+    "-accountPassword",
+    "-accountPass",
+    "-accountTotp",
+    "-proxyPass",
+    "-proxyPassArg",
+    "-sessionId",
+    "-accessToken",
+    "-refreshToken",
+    "--jagex-password",
+    "--jagex-totp",
+    "--jagex-session-id",
+    "--legacy-password",
+    "--legacy-password-raw",
+    "--legacy-totp-raw",
+    "--proxy-password",
+    "--proxy-password-raw",
+  ].map((item) => item.toLowerCase()));
+  return args.map((arg, index) => (sensitive.has(String(args[index - 1] || "").toLowerCase()) ? mask(String(arg)) : arg)).join(" ");
 }
 
 function latestStageFromText(text, status) {
@@ -1788,23 +2001,23 @@ async function reconcileLaunches(launches, javaProcesses = []) {
     .slice()
     .sort((a, b) => new Date(b.startedAt || 0).getTime() - new Date(a.startedAt || 0).getTime());
   const reconciledByPid = new Map();
-  const dreamBotClients = javaProcesses.filter(isDreamBotClientProcess);
 
   for (const launch of sorted) {
     const launchTime = new Date(launch.startedAt || 0).getTime();
     const savedClientPid = Number(launch.clientPid || 0);
-    const savedClient = dreamBotClients.find((item) =>
+    const clientProcesses = javaProcesses.filter((processInfo) => isLaunchClientProcess(processInfo, launch));
+    const savedClient = clientProcesses.find((item) =>
       item.pid === savedClientPid &&
       !usedClientPids.has(item.pid) &&
       (!item.startTime || item.startTime >= launchTime - 15000)
     );
-    const strongClient = dreamBotClients
+    const strongClient = clientProcesses
       .filter((item) => !usedClientPids.has(item.pid))
       .map((item) => ({ item, score: launchClientMatchScore(item, launch) }))
       .filter((match) => match.score >= 90)
       .sort((a, b) => b.score - a.score || Math.abs((a.item.startTime || launchTime) - launchTime) - Math.abs((b.item.startTime || launchTime) - launchTime))[0]?.item;
     const directRunning = isProcessRunning(launch.pid);
-    const weakCandidates = dreamBotClients
+    const weakCandidates = clientProcesses
       .filter((item) => !usedClientPids.has(item.pid))
       .filter((item) => item.startTime >= launchTime - 15000)
       .map((item) => ({ item, score: launchClientMatchScore(item, launch) }))
@@ -1817,7 +2030,9 @@ async function reconcileLaunches(launches, javaProcesses = []) {
     const isFreshLaunch = Date.now() - launchTime < 5 * 60 * 1000;
     let status = client ? "Running" : directRunning && isFreshLaunch ? "Starting" : "StoppedOrUnknown";
     const stdout = await readTextTail(launch.stdout, 2500);
-    const dreamBotLogPath = await findLatestDreamBotLog(launch.email, launchTime - 5000);
+    const dreamBotLogPath = normalizeBotClient(launch.botClient) === "dreambot"
+      ? await findLatestDreamBotLog(launch.email, launchTime - 5000)
+      : "";
     const dreamBotLog = dreamBotLogPath ? await readTextTail(dreamBotLogPath, 12000) : "";
     const banReason = extractBanStatusFromText(`${stdout}\n${dreamBotLog}`);
     const completionReason = banReason
@@ -1877,6 +2092,29 @@ function compactLaunchesForRows(launches, rows) {
   return visible
     .concat([...latestStoppedByIndex.values()])
     .sort((a, b) => new Date(b.startedAt || 0).getTime() - new Date(a.startedAt || 0).getTime());
+}
+
+function buildServerAccountActivities(rows, launches) {
+  return rows.map((row) => {
+    const index = Number(row.index);
+    const related = launches
+      .filter((launch) => Number(launch.index) === index)
+      .sort((a, b) => new Date(b.startedAt || 0).getTime() - new Date(a.startedAt || 0).getTime());
+    const active = related.find(isLaunchActive);
+    const latest = active || related[0] || null;
+    let health = "never";
+    if (active?.status === "Running") health = "online";
+    else if (active?.status === "Starting") health = "starting";
+    else if (latest) health = "stopped";
+    return {
+      index,
+      health,
+      status: latest?.status || "",
+      stage: latest?.stage || "",
+      lastLaunchAt: latest?.startedAt || "",
+      pid: latest?.effectivePid || latest?.clientPid || latest?.pid || "",
+    };
+  });
 }
 
 function launchNotificationKey(launch, type = "stopped") {
@@ -2121,6 +2359,288 @@ async function parseBody(req) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const aiAnalysisSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["summary", "severity", "confidence", "keyFindings", "suggestedActions", "affectedAccounts", "nextQuestion"],
+  properties: {
+    summary: { type: "string" },
+    severity: { type: "string", enum: ["ok", "info", "warning", "critical"] },
+    confidence: { type: "number", minimum: 0, maximum: 1 },
+    keyFindings: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["title", "detail", "evidence"],
+        properties: {
+          title: { type: "string" },
+          detail: { type: "string" },
+          evidence: { type: "string" },
+        },
+      },
+    },
+    suggestedActions: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["label", "reason", "risk"],
+        properties: {
+          label: { type: "string" },
+          reason: { type: "string" },
+          risk: { type: "string", enum: ["low", "medium", "high"] },
+        },
+      },
+    },
+    affectedAccounts: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["index", "email", "charName", "status", "reason"],
+        properties: {
+          index: { type: "number" },
+          email: { type: "string" },
+          charName: { type: "string" },
+          status: { type: "string" },
+          reason: { type: "string" },
+        },
+      },
+    },
+    nextQuestion: { type: "string" },
+  },
+};
+
+function compactRowForAi(row, accountsByIndex, activity, checkerResult) {
+  const account = accountsByIndex.get(Number(row.index)) || {};
+  return {
+    index: Number(row.index),
+    email: maskEmail(account.email || ""),
+    charName: row.charName || row.accountNickname || row.jagexDisplayName || "",
+    category: row.category || "default",
+    enabled: row.enabled !== false,
+    scriptName: row.scriptName || "",
+    scheduleName: row.scheduleName || "",
+    scriptParams: Array.isArray(row.scriptParams) ? row.scriptParams.join(" ") : String(row.scriptParams || ""),
+    worldMode: row.worldMode || "fixed",
+    world: row.world || "",
+    botClient: normalizeBotClient(row.botClient),
+    health: activity?.health || "unknown",
+    lastLaunchAt: activity?.lastLaunchAt || "",
+    checkerStatus: checkerResult?.status || "unchecked",
+    checkerMessage: checkerResult?.message || "",
+    totalLevel: checkerResult?.totalLevel || "",
+  };
+}
+
+async function buildAiAnalysisContext(body = {}) {
+  const config = await readConfig();
+  const accounts = await readAccounts();
+  const rows = normalizeConfigAccounts(config, accounts);
+  const appState = await readAppState();
+  const launches = await reconcileLaunches(appState.launches || [], await getJavaProcesses());
+  const visibleLaunches = compactLaunchesForRows(launches, rows);
+  const accountsByIndex = new Map(accounts.map((account) => [Number(account.index), account]));
+  const selectedIndex = Number(body.index);
+  const hasSelectedIndex = Number.isInteger(selectedIndex) && selectedIndex >= 0;
+  const scope = String(body.scope || "panel").trim() || "panel";
+  const filteredRows = hasSelectedIndex ? rows.filter((row) => Number(row.index) === selectedIndex) : rows;
+  const activityByIndex = new Map(buildServerAccountActivities(rows, visibleLaunches).map((item) => [Number(item.index), item]));
+  const checker = appState.checker && typeof appState.checker === "object" ? appState.checker : {};
+  const compactRows = filteredRows.slice(0, hasSelectedIndex ? 1 : 80).map((row) =>
+    compactRowForAi(row, accountsByIndex, activityByIndex.get(Number(row.index)), checker[row.index])
+  );
+
+  const activeLaunches = visibleLaunches
+    .filter(isLaunchActive)
+    .map((launch) => ({
+      index: Number(launch.index),
+      email: maskEmail(launch.email || ""),
+      botClient: normalizeBotClient(launch.botClient),
+      scriptName: launch.scriptName || "",
+      scheduleName: launch.scheduleName || "",
+      status: launch.status || "",
+      stage: launch.stage || "",
+      startedAt: launch.startedAt || "",
+      pid: launch.effectivePid || launch.clientPid || launch.pid || "",
+    }));
+
+  const recentLaunches = visibleLaunches
+    .filter((launch) => !hasSelectedIndex || Number(launch.index) === selectedIndex)
+    .slice(0, 8)
+    .map((launch) => ({
+      index: Number(launch.index),
+      email: maskEmail(launch.email || ""),
+      botClient: normalizeBotClient(launch.botClient),
+      scriptName: launch.scriptName || "",
+      scheduleName: launch.scheduleName || "",
+      status: launch.status || "",
+      stage: launch.stage || "",
+      startedAt: launch.startedAt || "",
+      completedAt: launch.completedAt || "",
+      completionReason: launch.completionReason || "",
+      banReason: launch.banReason || "",
+    }));
+
+  const ai = normalizeAiConfig(config);
+  const logSections = [];
+  if (ai.includeCheckerLog) {
+    logSections.push({
+      name: "checker.log",
+      text: redactSensitiveText(truncateText(await readTextTail(checkerLogPath, scope === "checker" ? 24000 : 14000), 24000)),
+    });
+  }
+  if (ai.includeLaunchLogs) {
+    for (const launch of visibleLaunches.filter((item) => !hasSelectedIndex || Number(item.index) === selectedIndex).slice(0, 4)) {
+      const stdout = await readTextTail(launch.stdout, 3500);
+      const stderr = await readTextTail(launch.stderr, 1800);
+      const launchTime = new Date(launch.startedAt || 0).getTime();
+      const dreamBotLogPath = normalizeBotClient(launch.botClient) === "dreambot"
+        ? await findLatestDreamBotLog(launch.email, launchTime - 5000)
+        : "";
+      const dreamBotLog = dreamBotLogPath ? await readTextTail(dreamBotLogPath, 3500) : "";
+      logSections.push({
+        name: `launch index ${launch.index} pid ${launch.pid}`,
+        text: redactSensitiveText(truncateText([stdout, stderr, dreamBotLog].filter(Boolean).join("\n\n"), 7000)),
+      });
+    }
+  }
+
+  return {
+    scope,
+    selectedIndex: hasSelectedIndex ? selectedIndex : null,
+    generatedAt: new Date().toISOString(),
+    overview: {
+      totalAccounts: rows.length,
+      visibleAccountsInContext: compactRows.length,
+      activeLaunches: activeLaunches.length,
+      checkerStatuses: Object.values(checker).reduce((acc, item) => {
+        const key = item?.status || "unchecked";
+        acc[key] = (acc[key] || 0) + 1;
+        return acc;
+      }, {}),
+    },
+    accounts: compactRows,
+    activeLaunches,
+    recentLaunches,
+    logSections,
+    userQuestion: redactSensitiveText(String(body.prompt || "").trim()),
+  };
+}
+
+function extractResponseText(payload) {
+  if (payload?.output_text) return String(payload.output_text);
+  const pieces = [];
+  for (const item of Array.isArray(payload?.output) ? payload.output : []) {
+    for (const content of Array.isArray(item.content) ? item.content : []) {
+      if (content.type === "output_text" && content.text) pieces.push(content.text);
+    }
+  }
+  return pieces.join("\n").trim();
+}
+
+function normalizeAiAnalysisPayload(value) {
+  const input = value && typeof value === "object" ? value : {};
+  return {
+    summary: String(input.summary || "Sem resumo retornado."),
+    severity: ["ok", "info", "warning", "critical"].includes(input.severity) ? input.severity : "info",
+    confidence: Math.max(0, Math.min(1, Number(input.confidence || 0))),
+    keyFindings: Array.isArray(input.keyFindings) ? input.keyFindings.slice(0, 8).map((item) => ({
+      title: String(item?.title || "Achado"),
+      detail: String(item?.detail || ""),
+      evidence: String(item?.evidence || ""),
+    })) : [],
+    suggestedActions: Array.isArray(input.suggestedActions) ? input.suggestedActions.slice(0, 8).map((item) => ({
+      label: String(item?.label || "Revisar"),
+      reason: String(item?.reason || ""),
+      risk: ["low", "medium", "high"].includes(item?.risk) ? item.risk : "medium",
+    })) : [],
+    affectedAccounts: Array.isArray(input.affectedAccounts) ? input.affectedAccounts.slice(0, 12).map((item) => ({
+      index: Number(item?.index || 0),
+      email: String(item?.email || ""),
+      charName: String(item?.charName || ""),
+      status: String(item?.status || ""),
+      reason: String(item?.reason || ""),
+    })) : [],
+    nextQuestion: String(input.nextQuestion || ""),
+  };
+}
+
+async function analyzeWithAi(body = {}) {
+  const config = await readConfig();
+  const ai = normalizeAiConfig(config);
+  if (!ai.enabled) throw new Error("AI Analyst está desativado. Ative na aba Config.");
+  if (!ai.openAiApiKey) throw new Error("OpenAI API key não configurada. Preencha na aba Config.");
+  if (!ai.model) throw new Error("Modelo de IA não configurado.");
+
+  const context = await buildAiAnalysisContext(body);
+  const prompt = [
+    "Analise o contexto do NeuraL Farm Control abaixo.",
+    "Responda em português do Brasil, seja direto e não invente ações que não aparecem no contexto.",
+    "Se uma evidência estiver fraca, diga que é uma hipótese.",
+    "Nunca sugira ação automática destrutiva; sugira confirmação manual quando houver risco.",
+    "",
+    JSON.stringify(context, null, 2),
+  ].join("\n");
+
+  const response = await fetch(openAiResponsesEndpoint, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${ai.openAiApiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: ai.model,
+      instructions: "Você é um analista de logs e operação do painel NeuraL Farm Control. Seu trabalho é explicar falhas, gargalos, sinais de ban/checker e próximos passos seguros.",
+      input: prompt,
+      max_output_tokens: 1800,
+      text: {
+        format: {
+          type: "json_schema",
+          name: "nfc_ai_log_analysis",
+          strict: true,
+          schema: aiAnalysisSchema,
+        },
+      },
+    }),
+  });
+
+  const payloadText = await response.text();
+  let payload = {};
+  try {
+    payload = payloadText ? JSON.parse(payloadText) : {};
+  } catch {
+    payload = { raw: payloadText };
+  }
+  if (!response.ok) {
+    const message = payload?.error?.message || payloadText || `OpenAI HTTP ${response.status}`;
+    throw new Error(`Falha na OpenAI: ${message}`);
+  }
+
+  const outputText = extractResponseText(payload);
+  let parsed = {};
+  try {
+    parsed = JSON.parse(outputText);
+  } catch {
+    parsed = { summary: outputText || "A OpenAI respondeu sem JSON válido.", severity: "warning" };
+  }
+
+  return {
+    ok: true,
+    model: ai.model,
+    createdAt: new Date().toISOString(),
+    contextMeta: {
+      scope: context.scope,
+      selectedIndex: context.selectedIndex,
+      accounts: context.accounts.length,
+      logSections: context.logSections.length,
+    },
+    usage: payload?.usage || null,
+    analysis: normalizeAiAnalysisPayload(parsed),
+  };
 }
 
 async function findAvailablePort(startPort, { minPort = 51000, maxPort = 65535, attempts = 500 } = {}) {
@@ -2695,6 +3215,10 @@ async function launchAccount(index, options = {}) {
     const tribotCliPath = resolveTribotCliPath(config);
     if (!tribotCliPath) throw new Error(`TRiBot CLI not found: ${config.tribotCliPath || "(vazio)"}`);
     config.tribotCliPath = tribotCliPath;
+  } else if (botClient === "epicbot") {
+    const epicBotPath = resolveEpicBotPath(config);
+    if (!epicBotPath) throw new Error(`EpicBot CLI not found: ${config.epicBotPath || "(vazio)"}`);
+    config.epicBotPath = epicBotPath;
   } else if (!existsSync(config.launcherPath)) {
     throw new Error(`DreamBot launcher not found: ${config.launcherPath}`);
   }
@@ -2703,7 +3227,7 @@ async function launchAccount(index, options = {}) {
   const existingLaunch = existingLaunches.find((item) => Number(item.index) === index && isLaunchActive(item));
   if (existingLaunch) throw new Error(`Account ${account.email} is already running.`);
 
-  const nickCaptureReady = botClient !== "tribot" && !options.skipNickCapture && !row.charName
+  const nickCaptureReady = botClient === "dreambot" && !options.skipNickCapture && !row.charName
     ? await ensureNickCaptureJarInstalled()
     : false;
 
@@ -2733,7 +3257,7 @@ async function launchAccount(index, options = {}) {
       message: "Conta sem nick: capturando nick antes do launch real.",
     };
   }
-  if (botClient !== "tribot" && !options.skipNickCapture && !row.charName && !nickCaptureReady) {
+  if (botClient === "dreambot" && !options.skipNickCapture && !row.charName && !nickCaptureReady) {
     await mkdir(logsDir, { recursive: true });
     const safeEmail = account.email.replace(/[^a-zA-Z0-9._-]/g, "_");
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -2756,7 +3280,11 @@ async function launchAccount(index, options = {}) {
     stdoutPath,
     `preparando launch ${botClient}: ${botClient === "dreambot" && row.scheduleName ? `schedule=${row.scheduleName}` : `script=${row.scriptName || config.defaultScriptName || "-"}`}.`,
   );
-  const launchCommand = botClient === "tribot" ? resolveTribotCliPath(config) : "java";
+  const launchCommand = botClient === "tribot"
+    ? resolveTribotCliPath(config)
+    : botClient === "epicbot"
+      ? resolveEpicBotPath(config)
+      : "java";
   const child = spawn(launchCommand, buildArgs({ account, row, config, remoteDebuggingPort }), {
     cwd: rootDir,
     windowsHide: true,
@@ -3176,6 +3704,7 @@ async function addAccount(body) {
     worldMode: "fixed",
     scriptParams: [],
     proxyId: "",
+    botClient: "dreambot",
   });
   await writeConfig(config);
   return { added: accounts.length - 1 };
@@ -3231,6 +3760,7 @@ async function bulkImportAccounts(body) {
         worldMode: "fixed",
         scriptParams: [],
         proxyId: "",
+        botClient: "dreambot",
       });
     });
     await writeConfig(config);
@@ -3266,6 +3796,7 @@ async function updateSettings(body) {
   const config = await readConfig();
   config.launcherPath = String(body.launcherPath || config.launcherPath || "");
   config.tribotCliPath = String(body.tribotCliPath || "").trim();
+  config.epicBotPath = String(body.epicBotPath || "").trim();
   config.defaultScriptName = String(body.defaultScriptName || "");
   config.defaultWorld = Number(body.defaultWorld || 301);
   config.useGeneratedTotp = Boolean(body.useGeneratedTotp);
@@ -3279,6 +3810,17 @@ async function updateSettings(body) {
     enabled: Boolean(body.discordWebhookEnabled),
     notifyOnStop: body.discordNotifyOnStop !== false,
     includeLogTail: body.discordIncludeLogTail !== false,
+  };
+  const currentAi = normalizeAiConfig(config);
+  const currentStoredAiKey = String(config.ai?.openAiApiKey || "").trim();
+  const nextAiKey = String(body.aiOpenAiApiKey || "").trim();
+  config.ai = {
+    enabled: Boolean(body.aiEnabled),
+    provider: "openai",
+    openAiApiKey: body.aiClearOpenAiApiKey ? "" : nextAiKey || currentStoredAiKey,
+    model: String(body.aiModel || currentAi.model || "gpt-5.6-luna").trim(),
+    includeCheckerLog: body.aiIncludeCheckerLog !== false,
+    includeLaunchLogs: body.aiIncludeLaunchLogs !== false,
   };
   await writeConfig(config);
   return { saved: true };
@@ -3312,6 +3854,7 @@ async function updateRow(body) {
   row.worldMode = normalizeWorldMode(body.worldMode);
   row.scriptParams = parseScriptParams(body.scriptParams);
   row.proxyId = normalizeProxyId(body.proxyId);
+  row.botClient = normalizeBotClient(body.botClient);
 
   if (!existing) config.accounts.push(row);
   await writeConfig(config);
@@ -4038,6 +4581,11 @@ const server = createServer(async (req, res) => {
 
     if (url.pathname === "/api/checker/stop" && req.method === "POST") {
       json(res, 200, await stopCheckerLaunches(await parseBody(req)));
+      return;
+    }
+
+    if (url.pathname === "/api/ai/analyze" && req.method === "POST") {
+      json(res, 200, await analyzeWithAi(await parseBody(req)));
       return;
     }
 
