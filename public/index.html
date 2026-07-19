@@ -119,6 +119,7 @@
             </select>
             <input id="bulkScriptName" autocomplete="off" placeholder="Script" />
             <input id="bulkScriptParams" autocomplete="off" placeholder="ARG" />
+            <input id="bulkEpicBotProfilePath" autocomplete="off" placeholder="Epic profile JSON" />
             <div class="world-control compact-world-control">
               <select id="bulkWorldMode">
                 <option value="fixed">Fixo</option>
@@ -144,6 +145,7 @@
                   <th>Script</th>
                   <th>Schedule</th>
                   <th>ARG</th>
+                  <th>Epic profile</th>
                   <th>World</th>
                   <th>Proxy</th>
                   <th>Resumo</th>
@@ -522,6 +524,10 @@
                 <input id="taskScriptParams" name="taskScriptParams" autocomplete="off" placeholder="Ranged70" />
               </label>
               <label>
+                Epic profile
+                <input id="taskEpicBotProfilePath" name="taskEpicBotProfilePath" autocomplete="off" placeholder="C:\\profiles\\settings.json" />
+              </label>
+              <label>
                 World
                 <div class="world-control">
                   <select id="taskWorldMode" name="taskWorldMode">
@@ -590,6 +596,7 @@
                   <th>Script</th>
                   <th>Schedule</th>
                   <th>ARG</th>
+                  <th>Epic profile</th>
                   <th>Proxy</th>
                   <th>Meta</th>
                   <th>Mover ao concluir</th>
@@ -629,6 +636,26 @@
           <label>
             EpicBot CLI
             <input id="epicBotPath" name="epicBotPath" autocomplete="off" placeholder="C:\\caminho\\EpicBot-NXT.exe" />
+          </label>
+          <label>
+            EpicBot platform
+            <input id="epicBotPlatform" name="epicBotPlatform" autocomplete="off" placeholder="deixe vazio para default" />
+          </label>
+          <label>
+            EpicBot heap
+            <input id="epicBotHeap" name="epicBotHeap" type="number" min="1" placeholder="512" />
+          </label>
+          <label>
+            EpicBot max heap
+            <input id="epicBotMaxHeap" name="epicBotMaxHeap" type="number" min="1" placeholder="1024" />
+          </label>
+          <label>
+            EpicBot mouse profile
+            <input id="epicBotMouseProfile" name="epicBotMouseProfile" autocomplete="off" placeholder="default" />
+          </label>
+          <label class="toggle-row">
+            <input id="epicBotUseSavedProxyName" name="epicBotUseSavedProxyName" type="checkbox" />
+            EpicBot usar proxy salvo por nome
           </label>
           <label>
             Script padrão

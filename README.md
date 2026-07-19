@@ -2,7 +2,7 @@
 
 Painel local para controlar uma farm de contas Jagex no DreamBot, com cadastro de contas, categorias, proxies, launch individual, launch em fila, logs, diagnostico e tasks continuas.
 
-Versao atual: `0.2.94`
+Versao atual: `0.2.98`
 
 ## Visao geral
 
@@ -28,7 +28,7 @@ Principais funcionalidades:
 - Log dedicado do Checker em `data/logs/checker.log`.
 - Aba AI Analyst para analisar logs/status com LLM via OpenAI.
 - Continuous Tasks para relancar contas automaticamente por categoria.
-- Suporte inicial para escolher DreamBot, TRiBot ou EpicBot por conta.
+- Suporte para escolher DreamBot, TRiBot ou EpicBot por conta.
 - Webhook Discord para notificacoes de rotina/processos.
 - Diagnostico do setup.
 - Aba Diagnóstico dedicada para avisos e erros de setup.
@@ -96,6 +96,7 @@ A aba `Config` concentra as configuracoes globais:
 - Caminho do `Launcher.jar` do DreamBot.
 - Caminho do `TRiBot CLI`.
 - Caminho do `EpicBot-NXT.exe`.
+- Opcoes avancadas do EpicBot: platform, heap, max heap, mouse profile e proxy salvo por nome.
 - Script padrao.
 - World padrao.
 - Maximo de instancias simultaneas.
@@ -105,7 +106,17 @@ A aba `Config` concentra as configuracoes globais:
 
 O caminho do `Launcher.jar` precisa apontar para o arquivo real do DreamBot no PC atual. Ao mover o projeto para outro computador, essa e a primeira configuracao que deve ser revisada.
 
-Para EpicBot, configure o campo `EpicBot CLI` apontando para o executavel `EpicBot-NXT.exe`.
+Para EpicBot, configure o campo `EpicBot CLI` apontando para o executavel `EpicBot-NXT.exe` quando quiser usar o launcher oficial. O painel usa sessao salva em `C:\Users\<usuario>\EpicBot\jagex_accounts.json` quando ela existir; nesse caso ele pode iniciar o runtime real diretamente via Java (`com.epicbot.client.nxt.Boot`). Para contas EpicBot ainda nao autenticadas, o painel volta para o `EpicBot-NXT.exe` oficial para permitir a autenticacao inicial.
+
+Campos avancados do EpicBot:
+
+- `EpicBot platform`: enviado como `--platform`.
+- `EpicBot heap`: enviado como `--heap`.
+- `EpicBot max heap`: enviado como `--max-heap`.
+- `EpicBot mouse profile`: enviado como `--mouse-profile`.
+- `EpicBot usar proxy salvo por nome`: quando ativo, o painel usa `--proxy <nome>` em vez de montar `--proxy-host`, `--proxy-port`, `--proxy-username` e `--proxy-password`.
+
+Deixe esses campos vazios para o EpicBot usar os defaults dele.
 
 Para usar o `AI Analyst`, ative a opcao na aba `Config`, preencha a `OpenAI API key` e escolha o modelo. O padrao sugerido e `gpt-5.6-luna`, mas o campo e livre para trocar por outro modelo compativel com a Responses API.
 
@@ -187,7 +198,7 @@ Use `Char name` para informar o nome do personagem no OSRS. O botao `Stats` busc
 
 O campo `Schedule` e opcional. No DreamBot, quando ele estiver preenchido, o painel usa o QuickStart com `-schedule=<nome>` e ignora `Script`/`ARG` naquele launch. No EpicBot, esse campo e enviado como `--schedule-id`. Quando `Schedule` estiver vazio, o launch usa `Script` normalmente.
 
-No EpicBot, preencha `Script` com o nome aceito pela CLI, por exemplo um nome `SDN-...` ou `LOCAL-...`. O campo `ARG` e enviado como `--script-profile`, entao use-o para o caminho do arquivo de profile/settings JSON quando o script EpicBot exigir profile.
+No EpicBot, preencha `Script` com o nome aceito pela CLI, por exemplo um nome `SDN-...` ou `LOCAL-...`. Use a coluna `Epic profile` para o caminho do arquivo de profile/settings JSON; ela e enviada como `--script-profile`. Se `Epic profile` estiver vazio, o painel ainda usa `ARG` como fallback para `--script-profile`, preservando compatibilidade com configuracoes antigas.
 
 Quando uma conta esta online, a linha ganha destaque verde. O painel detecta o processo real do DreamBot mesmo quando o launcher inicial fecha e o cliente Java fica rodando em outro PID.
 
@@ -221,7 +232,7 @@ O comando inclui:
 - Proxy, quando configurado.
 - Login Jagex/browser quando habilitado.
 
-Para EpicBot, o painel chama o `EpicBot-NXT.exe` configurado na aba `Config` e monta os parametros CLI com conta Jagex, TOTP, world, script/schedule e proxy.
+Para EpicBot, o painel chama o `EpicBot-NXT.exe` configurado na aba `Config` e monta os parametros CLI com conta Jagex, TOTP, world, script/schedule, profile, proxy e opcoes avancadas.
 
 Na aba `Config`, `Debug Jagex login` registra respostas relevantes do browser de login em `data/logs/jagex-debug-YYYY-MM-DD.log`. Use apenas para teste: o painel mascara campos sensiveis e tenta detectar candidatos a display name/char name.
 

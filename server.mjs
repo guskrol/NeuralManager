@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import { appendFile, copyFile, mkdir, open, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
-import { existsSync, createWriteStream } from "node:fs";
-import { extname, join, resolve } from "node:path";
+import { existsSync, createWriteStream, readdirSync, readFileSync } from "node:fs";
+import { delimiter, extname, join, resolve } from "node:path";
 import { execFile, spawn } from "node:child_process";
 import { createServer as createTcpServer } from "node:net";
 import { createHmac, randomUUID } from "node:crypto";
@@ -191,6 +191,13 @@ async function readConfig() {
       useStoredGameAccount: false,
       launchDelaySeconds: 20,
       maxInstances: 2,
+      epicBot: {
+        platform: "",
+        heap: "",
+        maxHeap: "",
+        mouseProfile: "",
+        useSavedProxyName: false,
+      },
       ai: {
         enabled: false,
         provider: "openai",
@@ -217,6 +224,7 @@ async function readConfig() {
   if (!config.continuous || typeof config.continuous !== "object") config.continuous = {};
   if (!Array.isArray(config.continuousTasks)) config.continuousTasks = [];
   if (!config.ai || typeof config.ai !== "object") config.ai = {};
+  if (!config.epicBot || typeof config.epicBot !== "object") config.epicBot = {};
   return config;
 }
 
@@ -517,6 +525,7 @@ function normalizeConfigAccounts(config, accounts) {
       category: normalizeCategory(item.category),
       scriptName: item.scriptName || config.defaultScriptName || "",
       scheduleName: String(item.scheduleName || "").trim(),
+      epicBotProfilePath: String(item.epicBotProfilePath || "").trim(),
       world: Number(item.world || config.defaultWorld || 301),
       worldMode: normalizeWorldMode(item.worldMode),
       scriptParams: Array.isArray(item.scriptParams) ? item.scriptParams : [],
@@ -581,6 +590,7 @@ function normalizeTask(task, config = {}) {
     scriptName: String(task.scriptName || (scheduleName ? "" : config.defaultScriptName || "")).trim(),
     scheduleName,
     scriptParams: parseScriptParams(task.scriptParams),
+    epicBotProfilePath: String(task.epicBotProfilePath || "").trim(),
     world: Number(task.world || config.defaultWorld || 301),
     worldMode: normalizeWorldMode(task.worldMode),
     proxyMode: normalizeProxyMode(task.proxyMode),
@@ -653,6 +663,35 @@ function normalizeBotClient(value) {
   return "dreambot";
 }
 
+function normalizePositiveIntegerText(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed > 0 ? String(parsed) : "";
+}
+
+function normalizeEpicBotConfig(config = {}) {
+  const value = config.epicBot && typeof config.epicBot === "object" ? config.epicBot : {};
+  return {
+    platform: String(value.platform || "").trim(),
+    heap: normalizePositiveIntegerText(value.heap),
+    maxHeap: normalizePositiveIntegerText(value.maxHeap),
+    mouseProfile: String(value.mouseProfile || "").trim(),
+    useSavedProxyName: Boolean(value.useSavedProxyName),
+  };
+}
+
+function compareVersionText(a, b) {
+  const partsA = String(a || "").split(".").map((part) => Number(part) || 0);
+  const partsB = String(b || "").split(".").map((part) => Number(part) || 0);
+  const length = Math.max(partsA.length, partsB.length);
+  for (let index = 0; index < length; index += 1) {
+    const diff = (partsA[index] || 0) - (partsB[index] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
 function maskEmail(value) {
   const email = String(value || "").trim();
   const match = email.match(/^([^@\s]+)@([^@\s]+)$/);
@@ -688,16 +727,183 @@ function resolveTribotCliPath(config = {}) {
 }
 
 function resolveEpicBotPath(config = {}) {
+  const userProfile = process.env.USERPROFILE || "";
   const candidates = [
     String(config.epicBotPath || "").trim(),
     process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, "EpicBot", "EpicBot-NXT.exe") : "",
     process.env.ProgramFiles ? join(process.env.ProgramFiles, "EpicBot", "EpicBot-NXT.exe") : "",
     process.env["ProgramFiles(x86)"] ? join(process.env["ProgramFiles(x86)"], "EpicBot", "EpicBot-NXT.exe") : "",
-    process.env.USERPROFILE ? join(process.env.USERPROFILE, "EpicBot", "EpicBot-NXT.exe") : "",
-    process.env.USERPROFILE ? join(process.env.USERPROFILE, "Downloads", "EpicBot-NXT.exe") : "",
+    userProfile ? join(userProfile, "EpicBot", "EpicBot-NXT.exe") : "",
+    userProfile ? join(userProfile, "Documents", "EpicBot", "EpicBot-NXT.exe") : "",
+    userProfile ? join(userProfile, "OneDrive", "Documents", "EpicBot", "EpicBot-NXT.exe") : "",
+    userProfile ? join(userProfile, "OneDrive", "Documentos", "EpicBot", "EpicBot-NXT.exe") : "",
+    userProfile ? join(userProfile, "Downloads", "EpicBot-NXT.exe") : "",
+    ...findEpicBotExecutablesInFolder(userProfile ? join(userProfile, "Downloads") : ""),
+    ...findEpicBotExecutablesInFolder(userProfile ? join(userProfile, "Desktop") : ""),
+    ...findEpicBotExecutablesInFolder(userProfile ? join(userProfile, "OneDrive", "Documentos", "EpicBot") : ""),
   ].filter(Boolean);
 
   return candidates.find((candidate) => existsSync(candidate)) || "";
+}
+
+function resolveEpicBotHome() {
+  const userProfile = process.env.USERPROFILE || "";
+  const candidates = [
+    userProfile ? join(userProfile, "EpicBot") : "",
+    process.env.APPDATA ? join(process.env.APPDATA, "EpicBot") : "",
+    process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, "EpicBot") : "",
+  ].filter(Boolean);
+  return candidates.find((candidate) => existsSync(join(candidate, "lib"))) || "";
+}
+
+function readEpicBotJagexAccounts() {
+  const home = resolveEpicBotHome();
+  const path = home ? join(home, "jagex_accounts.json") : "";
+  if (!path || !existsSync(path)) return [];
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8"));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function findEpicBotStoredSession(account, row = {}) {
+  const email = String(account?.email || "").trim().toLowerCase();
+  if (!email) return null;
+  const stored = readEpicBotJagexAccounts()
+    .find((item) => String(item.email || "").trim().toLowerCase() === email);
+  if (!stored?.sessionId) return null;
+
+  const rowChar = normalizePlayerName(row.charName || row.jagexDisplayName || row.accountNickname || "").toLowerCase();
+  const characters = Array.isArray(stored.rsAccounts) ? stored.rsAccounts : [];
+  const selectedCharacter = characters.find((character) => (
+    rowChar && normalizePlayerName(character.displayName || "").toLowerCase() === rowChar
+  )) || characters[0] || {};
+
+  return {
+    jagexSessionId: String(stored.sessionId || "").trim(),
+    jagexCharacterId: String(selectedCharacter.accountId || row.jagexCharacterId || "").trim(),
+    charName: normalizePlayerName(selectedCharacter.displayName || row.charName || ""),
+  };
+}
+
+function findEpicBotJavaExecutablesInFolder(folder) {
+  if (!folder || !existsSync(folder)) return [];
+  try {
+    const candidates = [];
+    for (const entry of readdirSync(folder, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !/epicbot/i.test(entry.name)) continue;
+      candidates.push(join(folder, entry.name, "jre-21", "bin", "java.exe"));
+      candidates.push(join(folder, entry.name, "jre", "bin", "java.exe"));
+    }
+    return candidates;
+  } catch {
+    return [];
+  }
+}
+
+function resolveEpicBotJavaPath(config = {}) {
+  const userProfile = process.env.USERPROFILE || "";
+  const configuredLauncher = resolveEpicBotPath(config);
+  const configuredDir = configuredLauncher ? dirname(configuredLauncher) : "";
+  const candidates = [
+    configuredDir ? join(configuredDir, "jre-21", "bin", "java.exe") : "",
+    configuredDir ? join(configuredDir, "jre", "bin", "java.exe") : "",
+    ...findEpicBotJavaExecutablesInFolder(userProfile ? join(userProfile, "Downloads") : ""),
+    ...findEpicBotJavaExecutablesInFolder(userProfile ? join(userProfile, "Desktop") : ""),
+    process.env.JAVA_HOME ? join(process.env.JAVA_HOME, "bin", "java.exe") : "",
+  ].filter(Boolean);
+  return candidates.find((candidate) => existsSync(candidate)) || "";
+}
+
+function buildEpicBotClasspath(libDir) {
+  if (!libDir || !existsSync(libDir)) return "";
+  const selected = new Map();
+
+  try {
+    for (const entry of readdirSync(libDir, { withFileTypes: true })) {
+      if (!entry.isFile() || !/\.jar$/i.test(entry.name)) continue;
+      const versioned = entry.name.match(/^(epicbot-.+)-(\d+(?:\.\d+)+)\.jar$/i);
+      const key = versioned ? versioned[1].toLowerCase() : entry.name.toLowerCase();
+      const current = selected.get(key);
+      const candidate = {
+        name: entry.name,
+        version: versioned ? versioned[2] : "",
+        path: join(libDir, entry.name),
+      };
+
+      if (!current || compareVersionText(candidate.version, current.version) > 0) {
+        selected.set(key, candidate);
+      }
+    }
+  } catch {
+    return "";
+  }
+
+  return [...selected.values()]
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((item) => item.path)
+    .join(delimiter);
+}
+
+function resolveEpicBotRuntime(config = {}) {
+  const home = resolveEpicBotHome();
+  const javaPath = resolveEpicBotJavaPath(config);
+  const libDir = home ? join(home, "lib") : "";
+  const classpath = buildEpicBotClasspath(libDir);
+  if (!home || !javaPath || !classpath) return null;
+  return { home, javaPath, classpath };
+}
+
+function buildEpicBotLaunchPlan(config = {}, { preferRuntime = true } = {}) {
+  const runtime = preferRuntime ? resolveEpicBotRuntime(config) : null;
+  if (runtime) {
+    const epicBot = normalizeEpicBotConfig(config);
+    const javaArgs = ["-Djava.net.preferIPv4Stack=true"];
+    if (epicBot.heap) javaArgs.push(`-Xms${epicBot.heap}m`);
+    if (epicBot.maxHeap) javaArgs.push(`-Xmx${epicBot.maxHeap}m`);
+    javaArgs.push("-cp", runtime.classpath, "com.epicbot.client.nxt.Boot");
+    return {
+      mode: "runtime",
+      command: runtime.javaPath,
+      argsPrefix: javaArgs,
+      cwd: runtime.home,
+    };
+  }
+
+  const launcherPath = resolveEpicBotPath(config);
+  if (!launcherPath) return null;
+  return {
+    mode: "launcher",
+    command: launcherPath,
+    argsPrefix: [],
+    cwd: rootDir,
+  };
+}
+
+function findEpicBotExecutablesInFolder(folder) {
+  if (!folder || !existsSync(folder)) return [];
+  try {
+    const candidates = [];
+    for (const entry of readdirSync(folder, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !/epicbot/i.test(entry.name)) continue;
+      const dir = join(folder, entry.name);
+      candidates.push(join(dir, "EpicBot-NXT.exe"));
+      candidates.push(join(dir, "EpicBot.exe"));
+    }
+    return candidates;
+  } catch {
+    return [];
+  }
+}
+
+function formatMissingEpicBotPathMessage(config = {}) {
+  const configured = String(config.epicBotPath || "").trim();
+  if (configured) {
+    return `EpicBot nao encontrado em: ${configured}. Confira a aba Config ou abra o EpicBot uma vez para montar C:\\Users\\<usuario>\\EpicBot.`;
+  }
+  return "EpicBot nao encontrado. Abra o EpicBot manualmente uma vez ou informe o caminho do EpicBot-NXT.exe na aba Config.";
 }
 
 function buildTaskRow(row, task) {
@@ -710,6 +916,7 @@ function buildTaskRow(row, task) {
     scriptName: task.scriptName,
     scheduleName: task.scheduleName,
     scriptParams: task.scriptParams,
+    epicBotProfilePath: task.epicBotProfilePath,
     world: task.world,
     worldMode: task.worldMode,
     proxyId,
@@ -722,6 +929,7 @@ function normalizeLaunchOverride(body, config) {
     body.scriptName === undefined &&
     body.scheduleName === undefined &&
     body.scriptParams === undefined &&
+    body.epicBotProfilePath === undefined &&
     body.world === undefined &&
     body.worldMode === undefined &&
     body.proxyId === undefined &&
@@ -745,6 +953,7 @@ function normalizeLaunchOverride(body, config) {
     scriptName: String(body.scriptName || config.defaultScriptName || ""),
     scheduleName: String(body.scheduleName || "").trim(),
     scriptParams: parseScriptParams(body.scriptParams),
+    epicBotProfilePath: String(body.epicBotProfilePath || "").trim(),
     world: Number(body.world || config.defaultWorld || 301),
     worldMode: normalizeWorldMode(body.worldMode),
     proxyId: normalizeProxyId(body.proxyId),
@@ -867,15 +1076,23 @@ function buildTribotArgs({ account, row, config }) {
   return args;
 }
 
-function buildEpicBotArgs({ account, row, config }) {
+function buildEpicBotArgs({ account, row, config, includeRuntimeOptions = true }) {
   const totp = String(account.totpSecret || "").trim();
   const proxies = normalizeProxies(config);
   const proxy = proxies.find((item) => item.enabled && item.id === normalizeProxyId(row.proxyId));
+  const epicBot = normalizeEpicBotConfig(config);
   const args = [];
   const scheduleName = String(row.scheduleName || "").trim();
   const scriptName = String(row.scriptName || config.defaultScriptName || "").trim();
   const charName = normalizePlayerName(row.charName || row.jagexDisplayName || row.accountNickname || "");
+  const scriptProfile = String(row.epicBotProfilePath || "").trim()
+    || (Array.isArray(row.scriptParams) ? row.scriptParams.join(" ") : String(row.scriptParams || "")).trim();
   const hasJagexSession = Boolean(row.jagexSessionId && row.jagexCharacterId);
+
+  if (epicBot.platform) args.push("--platform", epicBot.platform);
+  if (includeRuntimeOptions && epicBot.heap) args.push("--heap", epicBot.heap);
+  if (includeRuntimeOptions && epicBot.maxHeap) args.push("--max-heap", epicBot.maxHeap);
+  if (epicBot.mouseProfile) args.push("--mouse-profile", epicBot.mouseProfile);
 
   if (hasJagexSession) {
     args.push("--jagex-session-id", row.jagexSessionId, "--jagex-character-id", row.jagexCharacterId);
@@ -889,9 +1106,7 @@ function buildEpicBotArgs({ account, row, config }) {
     args.push("--schedule-id", scheduleName);
   } else if (scriptName) {
     args.push("--script-name", scriptName);
-    if (Array.isArray(row.scriptParams) && row.scriptParams.length) {
-      args.push("--script-profile", row.scriptParams.join(" "));
-    }
+    if (scriptProfile) args.push("--script-profile", scriptProfile);
   }
 
   if (String(row.worldMode || "fixed") === "fixed" && Number(row.world || config.defaultWorld || 0)) {
@@ -899,9 +1114,13 @@ function buildEpicBotArgs({ account, row, config }) {
   }
 
   if (proxy) {
-    args.push("--proxy-host", proxy.host, "--proxy-port", String(proxy.port));
-    if (proxy.username) args.push("--proxy-username", proxy.username);
-    if (proxy.password) args.push("--proxy-password", proxy.password);
+    if (epicBot.useSavedProxyName && proxy.name) {
+      args.push("--proxy", proxy.name);
+    } else {
+      args.push("--proxy-host", proxy.host, "--proxy-port", String(proxy.port));
+      if (proxy.username) args.push("--proxy-username", proxy.username);
+      if (proxy.password) args.push("--proxy-password", proxy.password);
+    }
   }
 
   return args;
@@ -914,8 +1133,7 @@ function buildArgs({ account, row, config, remoteDebuggingPort = 0 }) {
   return buildDreamBotArgs({ account, row, config, remoteDebuggingPort });
 }
 
-function buildSafeArgs({ account, row, config, remoteDebuggingPort = 0 }) {
-  const args = buildArgs({ account, row, config, remoteDebuggingPort });
+function redactCommandArgs(args) {
   const sensitive = new Set([
     "-accountPassword",
     "-accountPass",
@@ -936,11 +1154,15 @@ function buildSafeArgs({ account, row, config, remoteDebuggingPort = 0 }) {
   return args.map((arg, index) => (sensitive.has(String(args[index - 1] || "").toLowerCase()) ? mask(String(arg)) : arg));
 }
 
+function buildSafeArgs({ account, row, config, remoteDebuggingPort = 0 }) {
+  return redactCommandArgs(buildArgs({ account, row, config, remoteDebuggingPort }));
+}
+
 function formatCommandPreview(args) {
-  return `java ${args.map((arg) => {
+  return args.map((arg) => {
     const value = String(arg);
     return /\s|"/.test(value) ? `"${value.replaceAll('"', '\\"')}"` : value;
-  }).join(" ")}`;
+  }).join(" ");
 }
 
 function resolveWorld(row, config) {
@@ -1383,6 +1605,7 @@ function sanitizeConfig(config) {
     launchDelaySeconds: Number(config.launchDelaySeconds || 0),
     maxInstances: Number(config.maxInstances || 1),
     discordWebhook: normalizeDiscordWebhookConfig(config),
+    epicBot: normalizeEpicBotConfig(config),
     ai: sanitizeAiConfig(config),
     continuous: normalizeContinuousConfig(config),
   };
@@ -2425,6 +2648,7 @@ function compactRowForAi(row, accountsByIndex, activity, checkerResult) {
     scriptName: row.scriptName || "",
     scheduleName: row.scheduleName || "",
     scriptParams: Array.isArray(row.scriptParams) ? row.scriptParams.join(" ") : String(row.scriptParams || ""),
+    epicBotProfilePath: row.epicBotProfilePath || "",
     worldMode: row.worldMode || "fixed",
     world: row.world || "",
     botClient: normalizeBotClient(row.botClient),
@@ -3204,21 +3428,27 @@ async function launchAccount(index, options = {}) {
   const accounts = await readAccounts();
   const rows = normalizeConfigAccounts(config, accounts);
   const baseRow = rows.find((item) => item.index === index);
-  const row = options.rowOverride ? { ...baseRow, ...options.rowOverride } : baseRow;
+  let row = options.rowOverride ? { ...baseRow, ...options.rowOverride } : baseRow;
   const account = accounts[index];
   const botClient = normalizeBotClient(row?.botClient);
+  let epicBotLaunchPlan = null;
 
   if (!row) throw new Error(`Account index ${index} is not configured in farm.json.`);
   if (!row.enabled && !options.allowDisabled) throw new Error(`Account index ${index} is not enabled in farm.json.`);
   if (!account) throw new Error(`Account index ${index} was not found in accounts.txt.`);
+  if (botClient === "epicbot") {
+    const storedSession = findEpicBotStoredSession(account, row);
+    if (storedSession) row = { ...row, ...storedSession };
+  }
   if (botClient === "tribot") {
     const tribotCliPath = resolveTribotCliPath(config);
     if (!tribotCliPath) throw new Error(`TRiBot CLI not found: ${config.tribotCliPath || "(vazio)"}`);
     config.tribotCliPath = tribotCliPath;
   } else if (botClient === "epicbot") {
-    const epicBotPath = resolveEpicBotPath(config);
-    if (!epicBotPath) throw new Error(`EpicBot CLI not found: ${config.epicBotPath || "(vazio)"}`);
-    config.epicBotPath = epicBotPath;
+    const hasStoredSession = Boolean(row.jagexSessionId && row.jagexCharacterId);
+    epicBotLaunchPlan = buildEpicBotLaunchPlan(config, { preferRuntime: hasStoredSession });
+    if (!epicBotLaunchPlan) throw new Error(formatMissingEpicBotPathMessage(config));
+    if (epicBotLaunchPlan.mode === "launcher") config.epicBotPath = epicBotLaunchPlan.command;
   } else if (!existsSync(config.launcherPath)) {
     throw new Error(`DreamBot launcher not found: ${config.launcherPath}`);
   }
@@ -3275,18 +3505,32 @@ async function launchAccount(index, options = {}) {
   const remoteDebuggingPort = botClient === "dreambot" && usesBrowserLogin(row, config)
     ? await findAvailablePort(51000 + (index * 100), { minPort: 51000, maxPort: 65499, attempts: 700 })
     : 0;
-  const safeArgs = buildSafeArgs({ account, row, config, remoteDebuggingPort });
-  await appendLaunchLog(
-    stdoutPath,
-    `preparando launch ${botClient}: ${botClient === "dreambot" && row.scheduleName ? `schedule=${row.scheduleName}` : `script=${row.scriptName || config.defaultScriptName || "-"}`}.`,
-  );
   const launchCommand = botClient === "tribot"
     ? resolveTribotCliPath(config)
     : botClient === "epicbot"
-      ? resolveEpicBotPath(config)
+      ? epicBotLaunchPlan.command
       : "java";
-  const child = spawn(launchCommand, buildArgs({ account, row, config, remoteDebuggingPort }), {
-    cwd: rootDir,
+  const launchArgs = botClient === "epicbot"
+    ? [
+      ...epicBotLaunchPlan.argsPrefix,
+      ...buildEpicBotArgs({
+        account,
+        row,
+        config,
+        includeRuntimeOptions: epicBotLaunchPlan.mode !== "runtime",
+      }),
+    ]
+    : buildArgs({ account, row, config, remoteDebuggingPort });
+  const safeArgs = redactCommandArgs(launchArgs);
+  const previewSafeArgs = botClient === "epicbot" && epicBotLaunchPlan?.mode === "runtime"
+    ? safeArgs.map((arg, argIndex) => (safeArgs[argIndex - 1] === "-cp" ? "[EpicBot classpath]" : arg))
+    : safeArgs;
+  await appendLaunchLog(
+    stdoutPath,
+    `preparando launch ${botClient}${epicBotLaunchPlan ? ` (${epicBotLaunchPlan.mode}${row.jagexSessionId ? ", sessao salva" : ", login inicial"})` : ""}: ${botClient === "dreambot" && row.scheduleName ? `schedule=${row.scheduleName}` : `script=${row.scriptName || config.defaultScriptName || "-"}`}.`,
+  );
+  const child = spawn(launchCommand, launchArgs, {
+    cwd: epicBotLaunchPlan?.cwd || rootDir,
     windowsHide: true,
     detached: true,
     stdio: ["ignore", "pipe", "pipe"],
@@ -3317,7 +3561,7 @@ async function launchAccount(index, options = {}) {
     world: resolveWorld(row, config),
     pid: child.pid,
     startedAt: new Date().toISOString(),
-    commandPreview: formatCommandPreview([launchCommand, ...safeArgs]),
+    commandPreview: formatCommandPreview([launchCommand, ...previewSafeArgs]),
     remoteDebuggingPort,
     stdout: stdoutPath,
     stderr: stderrPath,
@@ -3700,6 +3944,7 @@ async function addAccount(body) {
     category,
     scriptName: config.defaultScriptName || "Teste",
     scheduleName: "",
+    epicBotProfilePath: "",
     world: Number(config.defaultWorld || 301),
     worldMode: "fixed",
     scriptParams: [],
@@ -3756,6 +4001,7 @@ async function bulkImportAccounts(body) {
         category,
         scriptName: config.defaultScriptName || "Teste",
         scheduleName: "",
+        epicBotProfilePath: "",
         world: Number(config.defaultWorld || 301),
         worldMode: "fixed",
         scriptParams: [],
@@ -3811,6 +4057,13 @@ async function updateSettings(body) {
     notifyOnStop: body.discordNotifyOnStop !== false,
     includeLogTail: body.discordIncludeLogTail !== false,
   };
+  config.epicBot = {
+    platform: String(body.epicBotPlatform || "").trim(),
+    heap: normalizePositiveIntegerText(body.epicBotHeap),
+    maxHeap: normalizePositiveIntegerText(body.epicBotMaxHeap),
+    mouseProfile: String(body.epicBotMouseProfile || "").trim(),
+    useSavedProxyName: Boolean(body.epicBotUseSavedProxyName),
+  };
   const currentAi = normalizeAiConfig(config);
   const currentStoredAiKey = String(config.ai?.openAiApiKey || "").trim();
   const nextAiKey = String(body.aiOpenAiApiKey || "").trim();
@@ -3850,6 +4103,7 @@ async function updateRow(body) {
   row.category = rowCategory;
   row.scriptName = String(body.scriptName || config.defaultScriptName || "");
   row.scheduleName = String(body.scheduleName || "").trim();
+  row.epicBotProfilePath = String(body.epicBotProfilePath || "").trim();
   row.world = Number(body.world || config.defaultWorld || 301);
   row.worldMode = normalizeWorldMode(body.worldMode);
   row.scriptParams = parseScriptParams(body.scriptParams);

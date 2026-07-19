@@ -85,6 +85,11 @@ function fillSettings(config) {
   $("#launcherPath").value = config.launcherPath || "";
   $("#tribotCliPath").value = config.tribotCliPath || "";
   $("#epicBotPath").value = config.epicBotPath || "";
+  $("#epicBotPlatform").value = config.epicBot?.platform || "";
+  $("#epicBotHeap").value = config.epicBot?.heap || "";
+  $("#epicBotMaxHeap").value = config.epicBot?.maxHeap || "";
+  $("#epicBotMouseProfile").value = config.epicBot?.mouseProfile || "";
+  $("#epicBotUseSavedProxyName").checked = Boolean(config.epicBot?.useSavedProxyName);
   $("#defaultScriptName").value = config.defaultScriptName || "";
   $("#defaultWorld").value = config.defaultWorld || 301;
   $("#maxInstances").value = config.maxInstances || 1;
@@ -389,6 +394,7 @@ function renderAccounts(snapshot) {
       <td><input class="row-script" value="${escapeHtml(row.scriptName || "")}" /></td>
       <td><input class="row-schedule" value="${escapeHtml(row.scheduleName || "")}" placeholder="schedule" /></td>
       <td><input class="row-args" value="${escapeHtml((row.scriptParams || []).join(" "))}" placeholder="args do script" /></td>
+      <td><input class="row-epic-profile" value="${escapeHtml(row.epicBotProfilePath || "")}" placeholder="settings.json" /></td>
       <td>
         <div class="world-control">
           <select class="row-world-mode">
@@ -422,7 +428,7 @@ function renderAccounts(snapshot) {
   }
 
   if (!snapshot.rows.length) {
-    body.innerHTML = `<tr><td colspan="14">Nenhuma conta configurada ainda.</td></tr>`;
+    body.innerHTML = `<tr><td colspan="15">Nenhuma conta configurada ainda.</td></tr>`;
   } else if (!filteredRows.length) {
     body.innerHTML = `<tr><td colspan="14">Nenhuma conta encontrada com os filtros atuais.</td></tr>`;
   }
@@ -1185,6 +1191,7 @@ function renderContinuousTasks(tasks) {
       <td>${escapeHtml(task.scriptName)}</td>
       <td>${escapeHtml(task.scheduleName || "-")}</td>
       <td>${escapeHtml((task.scriptParams || []).join(" ") || "-")}</td>
+      <td>${escapeHtml(task.epicBotProfilePath || "-")}</td>
       <td>${escapeHtml(proxyLabelForTask(task))}</td>
       <td>${escapeHtml(taskGoalLabel(task))}</td>
       <td>${escapeHtml(task.moveToCategoryOnComplete || "-")}</td>
@@ -1203,7 +1210,7 @@ function renderContinuousTasks(tasks) {
   }
 
   if (!tasks.length) {
-    body.innerHTML = `<tr><td colspan="12">Nenhuma continuous task criada ainda.</td></tr>`;
+    body.innerHTML = `<tr><td colspan="13">Nenhuma continuous task criada ainda.</td></tr>`;
   }
 }
 
@@ -1311,6 +1318,11 @@ async function saveSettings(event) {
       launcherPath: $("#launcherPath").value,
       tribotCliPath: $("#tribotCliPath").value,
       epicBotPath: $("#epicBotPath").value,
+      epicBotPlatform: $("#epicBotPlatform").value,
+      epicBotHeap: $("#epicBotHeap").value,
+      epicBotMaxHeap: $("#epicBotMaxHeap").value,
+      epicBotMouseProfile: $("#epicBotMouseProfile").value,
+      epicBotUseSavedProxyName: $("#epicBotUseSavedProxyName").checked,
       defaultScriptName: $("#defaultScriptName").value,
       defaultWorld: Number($("#defaultWorld").value),
       maxInstances: Number($("#maxInstances").value),
@@ -1522,6 +1534,7 @@ function rowPayload(tr) {
     scriptName: tr.querySelector(".row-script").value,
     scheduleName: tr.querySelector(".row-schedule").value,
     scriptParams: tr.querySelector(".row-args").value,
+    epicBotProfilePath: tr.querySelector(".row-epic-profile").value,
     world: Number(tr.querySelector(".row-world").value),
     worldMode: tr.querySelector(".row-world-mode").value,
     proxyId: tr.querySelector(".row-proxy").value,
@@ -1616,6 +1629,7 @@ async function launchRowByIndex(index) {
       scriptName: row.scriptName,
       scheduleName: row.scheduleName,
       scriptParams: (row.scriptParams || []).join(" "),
+      epicBotProfilePath: row.epicBotProfilePath || "",
       world: row.world,
       worldMode: row.worldMode,
       proxyId: row.proxyId,
@@ -1891,6 +1905,7 @@ async function saveContinuousTask(event) {
       scriptName: $("#taskScriptName").value,
       scheduleName: $("#taskScheduleName").value,
       scriptParams: $("#taskScriptParams").value,
+      epicBotProfilePath: $("#taskEpicBotProfilePath").value,
       world: Number($("#taskWorld").value),
       worldMode: $("#taskWorldMode").value,
       proxyMode: $("#taskProxyMode").value,
@@ -1916,6 +1931,7 @@ function fillTaskForm(task) {
   $("#taskScriptName").value = task.scriptName || "";
   $("#taskScheduleName").value = task.scheduleName || "";
   $("#taskScriptParams").value = (task.scriptParams || []).join(" ");
+  $("#taskEpicBotProfilePath").value = task.epicBotProfilePath || "";
   $("#taskWorld").value = task.world || state.snapshot?.config?.defaultWorld || 301;
   $("#taskWorldMode").value = task.worldMode || "fixed";
   $("#taskProxyMode").value = task.proxyMode || "account";
@@ -1938,6 +1954,7 @@ function resetTaskForm() {
     scriptName: state.snapshot?.config?.defaultScriptName || "",
     scheduleName: "",
     scriptParams: [],
+    epicBotProfilePath: "",
     world: state.snapshot?.config?.defaultWorld || 301,
     worldMode: "fixed",
     proxyMode: "account",
@@ -2104,11 +2121,12 @@ async function applyBulkAccountFields() {
 
   const scriptName = $("#bulkScriptName").value.trim();
   const scriptParams = $("#bulkScriptParams").value.trim();
+  const epicBotProfilePath = $("#bulkEpicBotProfilePath").value.trim();
   const category = $("#bulkCategory").value;
   const worldMode = $("#bulkWorldMode").value;
   const world = Number($("#bulkWorld").value || 301);
 
-  if (!category && !scriptName && !scriptParams && worldMode === "fixed" && !$("#bulkWorld").value.trim()) {
+  if (!category && !scriptName && !scriptParams && !epicBotProfilePath && worldMode === "fixed" && !$("#bulkWorld").value.trim()) {
     toast("Preencha pelo menos um campo para aplicar.");
     return;
   }
@@ -2119,6 +2137,7 @@ async function applyBulkAccountFields() {
       if (category) tr.querySelector(".row-category").value = category;
       if (scriptName) tr.querySelector(".row-script").value = scriptName;
       if (scriptParams) tr.querySelector(".row-args").value = scriptParams;
+      if (epicBotProfilePath) tr.querySelector(".row-epic-profile").value = epicBotProfilePath;
       tr.querySelector(".row-world-mode").value = worldMode;
       tr.querySelector(".row-world").value = Number.isFinite(world) && world > 0 ? world : 301;
       tr.querySelector(".row-world").disabled = worldMode !== "fixed";
