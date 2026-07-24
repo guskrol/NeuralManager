@@ -1724,6 +1724,7 @@ async function getSnapshot() {
   if (stateChanged) await writeAppState(appState);
   const rowsWithCharNames = await discoverCharNamesFromLogs(config, rows, alive);
   const visibleLaunches = compactLaunchesForRows(alive, rowsWithCharNames);
+  const clientLaunches = visibleLaunches.map(sanitizeLaunchForClient);
 
   return {
     config: sanitizeConfig(config),
@@ -1744,7 +1745,7 @@ async function getSnapshot() {
       password: mask(proxy.password),
       enabled: proxy.enabled,
     })),
-    launches: visibleLaunches,
+    launches: clientLaunches,
     categories: normalizeCategories(config, rows, tasks),
     continuousTasks: tasks,
     checker: appState.checker && typeof appState.checker === "object" ? appState.checker : {},
@@ -2105,6 +2106,12 @@ function launchClientMatchScore(processInfo, launch) {
   let score = 0;
   const email = String(launch?.email || "");
   if (email && haystack.includes(email.toLowerCase())) score += 100;
+  const charName = normalizePlayerName(launch?.charName || "");
+  if (charName && haystack.includes(charName.toLowerCase())) score += 95;
+  const jagexCharacterId = String(launch?.jagexCharacterId || "").trim();
+  if (jagexCharacterId && haystack.includes(jagexCharacterId.toLowerCase())) score += 95;
+  const jagexSessionId = String(launch?.jagexSessionId || "").trim();
+  if (jagexSessionId && haystack.includes(jagexSessionId.toLowerCase())) score += 95;
   const accountNickname = String(launch?.accountNickname || "").trim();
   if (accountNickname && haystack.includes(accountNickname.toLowerCase())) score += 90;
   const jagexDisplayName = String(launch?.jagexDisplayName || "").trim();
@@ -2225,7 +2232,18 @@ async function reconcileLaunches(launches, javaProcesses = []) {
     .sort((a, b) => new Date(b.startedAt || 0).getTime() - new Date(a.startedAt || 0).getTime());
   const reconciledByPid = new Map();
 
-  for (const launch of sorted) {
+  for (const originalLaunch of sorted) {
+    const storedEpicSession = normalizeBotClient(originalLaunch.botClient) === "epicbot" && !(originalLaunch.jagexSessionId && originalLaunch.jagexCharacterId)
+      ? findEpicBotStoredSession({ email: originalLaunch.email }, originalLaunch)
+      : null;
+    const launch = storedEpicSession
+      ? {
+        ...originalLaunch,
+        charName: originalLaunch.charName || storedEpicSession.charName || "",
+        jagexCharacterId: originalLaunch.jagexCharacterId || storedEpicSession.jagexCharacterId || "",
+        jagexSessionId: originalLaunch.jagexSessionId || storedEpicSession.jagexSessionId || "",
+      }
+      : originalLaunch;
     const launchTime = new Date(launch.startedAt || 0).getTime();
     const savedClientPid = Number(launch.clientPid || 0);
     const clientProcesses = javaProcesses.filter((processInfo) => isLaunchClientProcess(processInfo, launch));
@@ -2315,6 +2333,14 @@ function compactLaunchesForRows(launches, rows) {
   return visible
     .concat([...latestStoppedByIndex.values()])
     .sort((a, b) => new Date(b.startedAt || 0).getTime() - new Date(a.startedAt || 0).getTime());
+}
+
+function sanitizeLaunchForClient(launch = {}) {
+  const { jagexSessionId, ...safeLaunch } = launch;
+  return {
+    ...safeLaunch,
+    hasJagexSession: Boolean(jagexSessionId),
+  };
 }
 
 function buildServerAccountActivities(rows, launches) {
@@ -3525,9 +3551,12 @@ async function launchAccount(index, options = {}) {
   const previewSafeArgs = botClient === "epicbot" && epicBotLaunchPlan?.mode === "runtime"
     ? safeArgs.map((arg, argIndex) => (safeArgs[argIndex - 1] === "-cp" ? "[EpicBot classpath]" : arg))
     : safeArgs;
+  const launchTarget = row.scheduleName
+    ? `schedule=${row.scheduleName}`
+    : `script=${row.scriptName || config.defaultScriptName || "-"}`;
   await appendLaunchLog(
     stdoutPath,
-    `preparando launch ${botClient}${epicBotLaunchPlan ? ` (${epicBotLaunchPlan.mode}${row.jagexSessionId ? ", sessao salva" : ", login inicial"})` : ""}: ${botClient === "dreambot" && row.scheduleName ? `schedule=${row.scheduleName}` : `script=${row.scriptName || config.defaultScriptName || "-"}`}.`,
+    `preparando launch ${botClient}${epicBotLaunchPlan ? ` (${epicBotLaunchPlan.mode}${row.jagexSessionId ? ", sessao salva" : ", login inicial"})` : ""}: ${launchTarget}.`,
   );
   const child = spawn(launchCommand, launchArgs, {
     cwd: epicBotLaunchPlan?.cwd || rootDir,
@@ -3556,6 +3585,9 @@ async function launchAccount(index, options = {}) {
     botClient,
     scheduleName: row.scheduleName || "",
     scriptParams: row.scriptParams,
+    charName: row.charName || "",
+    jagexCharacterId: row.jagexCharacterId || "",
+    jagexSessionId: row.jagexSessionId || "",
     accountNickname: row.accountNickname || "",
     jagexDisplayName: row.jagexDisplayName || "",
     world: resolveWorld(row, config),

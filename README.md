@@ -2,7 +2,7 @@
 
 Painel local para controlar uma farm de contas Jagex no DreamBot, com cadastro de contas, categorias, proxies, launch individual, launch em fila, logs, diagnostico e tasks continuas.
 
-Versao atual: `0.2.98`
+Versao atual: `0.2.99`
 
 ## Visao geral
 
@@ -106,7 +106,7 @@ A aba `Config` concentra as configuracoes globais:
 
 O caminho do `Launcher.jar` precisa apontar para o arquivo real do DreamBot no PC atual. Ao mover o projeto para outro computador, essa e a primeira configuracao que deve ser revisada.
 
-Para EpicBot, configure o campo `EpicBot CLI` apontando para o executavel `EpicBot-NXT.exe` quando quiser usar o launcher oficial. O painel usa sessao salva em `C:\Users\<usuario>\EpicBot\jagex_accounts.json` quando ela existir; nesse caso ele pode iniciar o runtime real diretamente via Java (`com.epicbot.client.nxt.Boot`). Para contas EpicBot ainda nao autenticadas, o painel volta para o `EpicBot-NXT.exe` oficial para permitir a autenticacao inicial.
+Para EpicBot, configure o campo `EpicBot CLI` apontando para o executavel `EpicBot-NXT.exe` quando quiser usar o launcher oficial. O painel usa sessao salva em `C:\Users\<usuario>\EpicBot\jagex_accounts.json` quando ela existir; nesse caso ele pode iniciar o runtime real diretamente via Java (`com.epicbot.client.nxt.Boot`). Para contas EpicBot ainda nao autenticadas, o painel volta para o `EpicBot-NXT.exe` oficial para permitir a autenticacao inicial. Quando o campo `Schedule` estiver preenchido, o EpicBot recebe `--schedule-id` e a schedule tem prioridade sobre `Script`/`Epic profile`.
 
 Campos avancados do EpicBot:
 
