@@ -89,6 +89,7 @@ function fillSettings(config) {
   $("#epicBotHeap").value = config.epicBot?.heap || "";
   $("#epicBotMaxHeap").value = config.epicBot?.maxHeap || "";
   $("#epicBotMouseProfile").value = config.epicBot?.mouseProfile || "";
+  $("#epicBotCpuRendering").checked = config.epicBot?.cpuRendering !== false;
   $("#epicBotUseSavedProxyName").checked = Boolean(config.epicBot?.useSavedProxyName);
   $("#defaultScriptName").value = config.defaultScriptName || "";
   $("#defaultWorld").value = config.defaultWorld || 301;
@@ -1322,6 +1323,7 @@ async function saveSettings(event) {
       epicBotHeap: $("#epicBotHeap").value,
       epicBotMaxHeap: $("#epicBotMaxHeap").value,
       epicBotMouseProfile: $("#epicBotMouseProfile").value,
+      epicBotCpuRendering: $("#epicBotCpuRendering").checked,
       epicBotUseSavedProxyName: $("#epicBotUseSavedProxyName").checked,
       defaultScriptName: $("#defaultScriptName").value,
       defaultWorld: Number($("#defaultWorld").value),
