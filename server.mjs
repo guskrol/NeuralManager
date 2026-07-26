@@ -196,7 +196,6 @@ async function readConfig() {
         heap: "",
         maxHeap: "",
         mouseProfile: "",
-        cpuRendering: true,
         useSavedProxyName: false,
       },
       ai: {
@@ -678,7 +677,6 @@ function normalizeEpicBotConfig(config = {}) {
     heap: normalizePositiveIntegerText(value.heap),
     maxHeap: normalizePositiveIntegerText(value.maxHeap),
     mouseProfile: String(value.mouseProfile || "").trim(),
-    cpuRendering: value.cpuRendering !== false,
     useSavedProxyName: Boolean(value.useSavedProxyName),
   };
 }
@@ -1095,7 +1093,6 @@ function buildEpicBotArgs({ account, row, config, includeRuntimeOptions = true }
   if (includeRuntimeOptions && epicBot.heap) args.push("--heap", epicBot.heap);
   if (includeRuntimeOptions && epicBot.maxHeap) args.push("--max-heap", epicBot.maxHeap);
   if (epicBot.mouseProfile) args.push("--mouse-profile", epicBot.mouseProfile);
-  if (epicBot.cpuRendering) args.push("--cpu-rendering");
 
   if (hasJagexSession) {
     args.push("--jagex-session-id", row.jagexSessionId, "--jagex-character-id", row.jagexCharacterId);
@@ -4097,7 +4094,6 @@ async function updateSettings(body) {
     heap: normalizePositiveIntegerText(body.epicBotHeap),
     maxHeap: normalizePositiveIntegerText(body.epicBotMaxHeap),
     mouseProfile: String(body.epicBotMouseProfile || "").trim(),
-    cpuRendering: body.epicBotCpuRendering !== false,
     useSavedProxyName: Boolean(body.epicBotUseSavedProxyName),
   };
   const currentAi = normalizeAiConfig(config);

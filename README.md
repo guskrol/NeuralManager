@@ -2,7 +2,7 @@
 
 Painel local para controlar uma farm de contas Jagex no DreamBot, com cadastro de contas, categorias, proxies, launch individual, launch em fila, logs, diagnostico e tasks continuas.
 
-Versao atual: `0.2.100`
+Versao atual: `0.2.101`
 
 ## Visao geral
 
@@ -114,7 +114,6 @@ Campos avancados do EpicBot:
 - `EpicBot heap`: enviado como `--heap`.
 - `EpicBot max heap`: enviado como `--max-heap`.
 - `EpicBot mouse profile`: enviado como `--mouse-profile`.
-- `EpicBot CPU rendering`: vem ligado por padrao e envia `--cpu-rendering`.
 - `EpicBot usar proxy salvo por nome`: quando ativo, o painel usa `--proxy <nome>` em vez de montar `--proxy-host`, `--proxy-port`, `--proxy-username` e `--proxy-password`.
 
 Deixe esses campos vazios para o EpicBot usar os defaults dele.
