@@ -2,7 +2,7 @@
 
 Painel local para controlar uma farm de contas Jagex no DreamBot, com cadastro de contas, categorias, proxies, launch individual, launch em fila, logs, diagnostico e tasks continuas.
 
-Versao atual: `0.2.101`
+Versao atual: `0.2.102`
 
 ## Visao geral
 
@@ -138,6 +138,13 @@ Voce pode adicionar uma conta individualmente ou usar o bulk import com varias l
 email1:senha1:TOTP_SECRET_1
 email2:senha2:TOTP_SECRET_2
 email3:senha3:TOTP_SECRET_3
+```
+
+Para contas Legacy usadas no EpicBot, use somente `login:senha`. O Manager identifica automaticamente essas linhas como Legacy, salva sem TOTP e configura o executor inicial como `EpicBot`.
+
+```text
+legacy_login1:senha1
+legacy_login2:senha2
 ```
 
 Ao adicionar a conta, escolha a categoria desejada. Essa categoria sera usada depois pelas tasks continuas e pelos filtros da farm.

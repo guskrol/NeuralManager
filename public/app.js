@@ -380,6 +380,7 @@ function renderAccounts(snapshot) {
       <td><input class="row-selected account-select-checkbox" type="checkbox" aria-label="Selecionar conta" ${state.selectedAccountIndexes.has(Number(row.index)) ? "checked" : ""} /></td>
       <td>
         <span class="account-email">${account?.email || "(sem conta)"}</span>
+        ${row.loginType === "legacy" ? `<span class="checker-pill compact warning">LEGACY</span>` : ""}
         <span class="account-meta char-name-display">Nick: ${row.charName ? escapeHtml(row.charName) : "aguardando script"}</span>
         <input class="row-char-name" type="hidden" value="${escapeHtml(row.charName || "")}" />
       </td>
@@ -1539,6 +1540,7 @@ function rowPayload(tr) {
     worldMode: tr.querySelector(".row-world-mode").value,
     proxyId: tr.querySelector(".row-proxy").value,
     botClient: tr.querySelector(".row-launch-client")?.value || "dreambot",
+    loginType: existingRow?.loginType || "jagex",
     enabled: existingRow?.enabled !== false,
   };
 }

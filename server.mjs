@@ -82,15 +82,38 @@ function normalizeWorldMode(value) {
 function parseAccountLine(line, index) {
   const firstColon = line.indexOf(":");
   const lastColon = line.lastIndexOf(":");
-  if (firstColon <= 0 || lastColon <= firstColon) {
-    throw new Error(`Invalid account format on line ${index + 1}. Expected email:password:totp_secret`);
+  if (firstColon <= 0) {
+    throw new Error(`Invalid account format on line ${index + 1}. Expected login:password or email:password:totp_secret`);
+  }
+
+  if (lastColon === firstColon) {
+    const login = line.slice(0, firstColon).trim();
+    const password = line.slice(firstColon + 1);
+    if (!login || !password) {
+      throw new Error(`Invalid legacy account format on line ${index + 1}. Expected login:password`);
+    }
+    return {
+      index,
+      email: login,
+      password,
+      totpSecret: "",
+      loginType: "legacy",
+    };
+  }
+
+  const email = line.slice(0, firstColon).trim();
+  const password = line.slice(firstColon + 1, lastColon);
+  const totpSecret = line.slice(lastColon + 1).trim();
+  if (!email || !password || !totpSecret) {
+    throw new Error(`Invalid Jagex account format on line ${index + 1}. Expected email:password:totp_secret`);
   }
 
   return {
     index,
-    email: line.slice(0, firstColon),
-    password: line.slice(firstColon + 1, lastColon),
-    totpSecret: line.slice(lastColon + 1),
+    email,
+    password,
+    totpSecret,
+    loginType: "jagex",
   };
 }
 
@@ -106,11 +129,12 @@ function parseBulkAccountLines(text) {
   lines.forEach((line, lineIndex) => {
     try {
       const parsed = parseAccountLine(line, lineIndex);
-      getTotpCode(parsed.totpSecret);
+      if (parsed.loginType !== "legacy") getTotpCode(parsed.totpSecret);
       valid.push({
         email: parsed.email,
         password: parsed.password,
         totpSecret: parsed.totpSecret,
+        loginType: parsed.loginType,
         lineNumber: lineIndex + 1,
       });
     } catch (error) {
@@ -172,7 +196,11 @@ async function readAccounts() {
 }
 
 async function writeAccounts(accounts) {
-  const lines = accounts.map((account) => `${account.email}:${account.password}:${account.totpSecret}`);
+  const lines = accounts.map((account) =>
+    account.loginType === "legacy"
+      ? `${account.email}:${account.password}`
+      : `${account.email}:${account.password}:${account.totpSecret}`
+  );
   await writeTextFileSafely(accountsPath, `${lines.join("\n")}${lines.length ? "\n" : ""}`);
 }
 
@@ -513,6 +541,7 @@ function normalizeConfigAccounts(config, accounts) {
       index: account.index,
       enabled: item.enabled !== false,
       email: account.email ?? "",
+      loginType: item.loginType === "legacy" || account.loginType === "legacy" ? "legacy" : "jagex",
       accountNickname: String(item.accountNickname || "").trim(),
       botClient: normalizeBotClient(item.botClient),
       jagexSessionId: String(item.jagexSessionId || "").trim(),
@@ -941,6 +970,7 @@ function normalizeLaunchOverride(body, config) {
     body.jagexRefreshToken === undefined &&
     body.notes === undefined &&
     body.charName === undefined &&
+    body.loginType === undefined &&
     body.botClient === undefined &&
     body.enabled === undefined
   ) {
@@ -966,6 +996,7 @@ function normalizeLaunchOverride(body, config) {
     jagexRefreshToken: String(body.jagexRefreshToken || "").trim(),
     notes: String(body.notes || "").trim(),
     charName: String(body.charName || "").trim(),
+    loginType: body.loginType === "legacy" ? "legacy" : "jagex",
   };
 }
 
@@ -1088,13 +1119,16 @@ function buildEpicBotArgs({ account, row, config, includeRuntimeOptions = true }
   const scriptProfile = String(row.epicBotProfilePath || "").trim()
     || (Array.isArray(row.scriptParams) ? row.scriptParams.join(" ") : String(row.scriptParams || "")).trim();
   const hasJagexSession = Boolean(row.jagexSessionId && row.jagexCharacterId);
+  const isLegacy = row.loginType === "legacy" || account.loginType === "legacy";
 
   if (epicBot.platform) args.push("--platform", epicBot.platform);
   if (includeRuntimeOptions && epicBot.heap) args.push("--heap", epicBot.heap);
   if (includeRuntimeOptions && epicBot.maxHeap) args.push("--max-heap", epicBot.maxHeap);
   if (epicBot.mouseProfile) args.push("--mouse-profile", epicBot.mouseProfile);
 
-  if (hasJagexSession) {
+  if (isLegacy) {
+    args.push("--legacy-username", account.email, "--legacy-password", account.password);
+  } else if (hasJagexSession) {
     args.push("--jagex-session-id", row.jagexSessionId, "--jagex-character-id", row.jagexCharacterId);
   } else {
     args.push("--jagex-email", account.email, "--jagex-password", account.password);
@@ -1144,6 +1178,7 @@ function redactCommandArgs(args) {
     "--jagex-password",
     "--jagex-totp",
     "--jagex-session-id",
+    "--legacy-password",
     "--legacy-password-raw",
     "--legacy-totp-raw",
     "-proxyPass",
@@ -1733,7 +1768,8 @@ async function getSnapshot() {
       index: account.index,
       email: account.email,
       password: mask(account.password),
-      totpSecret: mask(account.totpSecret),
+      totpSecret: account.loginType === "legacy" ? "" : mask(account.totpSecret),
+      loginType: account.loginType === "legacy" ? "legacy" : "jagex",
     })),
     rows: rowsWithCharNames,
     proxies: proxies.map((proxy) => ({
@@ -3462,6 +3498,9 @@ async function launchAccount(index, options = {}) {
   if (!row) throw new Error(`Account index ${index} is not configured in farm.json.`);
   if (!row.enabled && !options.allowDisabled) throw new Error(`Account index ${index} is not enabled in farm.json.`);
   if (!account) throw new Error(`Account index ${index} was not found in accounts.txt.`);
+  if ((row.loginType === "legacy" || account.loginType === "legacy") && botClient !== "epicbot") {
+    throw new Error("Legacy accounts are supported only with EpicBot launches.");
+  }
   if (botClient === "epicbot") {
     const storedSession = findEpicBotStoredSession(account, row);
     if (storedSession) row = { ...row, ...storedSession };
@@ -3960,7 +3999,7 @@ async function addAccount(body) {
   getTotpCode(totpSecret);
 
   const accounts = await readAccounts();
-  accounts.push({ email, password, totpSecret });
+  accounts.push({ email, password, totpSecret, loginType: "jagex" });
   await writeAccounts(accounts);
 
   const config = await readConfig();
@@ -3971,6 +4010,7 @@ async function addAccount(body) {
   config.accounts.push({
     index: accounts.length - 1,
     enabled: true,
+    loginType: "jagex",
     notes: "",
     charName: "",
     category,
@@ -4011,6 +4051,7 @@ async function bulkImportAccounts(body) {
       email: account.email,
       password: account.password,
       totpSecret: account.totpSecret,
+      loginType: account.loginType,
     });
   }
 
@@ -4028,6 +4069,7 @@ async function bulkImportAccounts(body) {
       config.accounts.push({
         index: startIndex + offset,
         enabled: true,
+        loginType: account.loginType === "legacy" ? "legacy" : "jagex",
         notes: "",
         charName: "",
         category,
@@ -4038,7 +4080,7 @@ async function bulkImportAccounts(body) {
         worldMode: "fixed",
         scriptParams: [],
         proxyId: "",
-        botClient: "dreambot",
+        botClient: account.loginType === "legacy" ? "epicbot" : "dreambot",
       });
     });
     await writeConfig(config);
@@ -4061,7 +4103,11 @@ async function exportAccountsTxt(body = {}) {
   const selected = new Set(indexes);
   const content = accounts
     .filter((_, index) => selected.has(index))
-    .map((account) => `${account.email}:${account.password}:${account.totpSecret}`)
+    .map((account) =>
+      account.loginType === "legacy"
+        ? `${account.email}:${account.password}`
+        : `${account.email}:${account.password}:${account.totpSecret}`
+    )
     .join("\n");
   return {
     filename: `neural-accounts-${new Date().toISOString().slice(0, 10)}.txt`,
@@ -4132,6 +4178,7 @@ async function updateRow(body) {
   if (body.jagexRefreshToken !== undefined) row.jagexRefreshToken = String(body.jagexRefreshToken || "").trim();
   row.notes = String(body.notes || "").trim();
   row.charName = String(body.charName || "").trim();
+  if (body.loginType !== undefined) row.loginType = body.loginType === "legacy" ? "legacy" : "jagex";
   row.category = rowCategory;
   row.scriptName = String(body.scriptName || config.defaultScriptName || "");
   row.scheduleName = String(body.scheduleName || "").trim();
