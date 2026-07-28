@@ -2,7 +2,7 @@
 
 Painel local para controlar uma farm de contas Jagex no DreamBot, com cadastro de contas, categorias, proxies, launch individual, launch em fila, logs, diagnostico e tasks continuas.
 
-Versao atual: `0.2.102`
+Versao atual: `0.2.103`
 
 ## Visao geral
 

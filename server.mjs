@@ -343,7 +343,10 @@ async function readAppState() {
     parsed = JSON.parse(raw);
   } catch (error) {
     const repaired = parseFirstJsonValue(raw);
-    if (!repaired) throw error;
+    if (!repaired) {
+      await writeTextFileSafely(`${statePath}.corrupt-${Date.now()}.bak`, raw);
+      return defaultAppState();
+    }
     parsed = repaired;
     await writeTextFileSafely(`${statePath}.corrupt-${Date.now()}.bak`, raw);
     await writeAppState(parsed);
