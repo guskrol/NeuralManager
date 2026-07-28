@@ -1341,10 +1341,48 @@ function extractBanStatusFromText(text) {
   if (/High severity server response,\s*stopping script!\s*Response:\s*(?:DISABLED|BANNED)/i.test(raw)) {
     return "High severity server response";
   }
-  if (/\baccount\b.*\b(?:banned|disabled|locked)\b/i.test(raw)) {
-    return "Account banned/disabled";
-  }
   return "";
+}
+
+function parseDreamBotLogTimestamp(line, referenceMs = Date.now()) {
+  const text = String(line || "").trim();
+  const dated = text.match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2}):(\d{2})/);
+  if (dated) {
+    const [, year, month, day, hour, minute, second] = dated;
+    const value = new Date(
+      Number(year),
+      Number(month) - 1,
+      Number(day),
+      Number(hour),
+      Number(minute),
+      Number(second),
+    ).getTime();
+    return Number.isFinite(value) ? value : 0;
+  }
+
+  const timed = text.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM):/i);
+  if (!timed) return 0;
+  const base = new Date(referenceMs);
+  let hour = Number(timed[1]);
+  const minute = Number(timed[2]);
+  const second = Number(timed[3] || 0);
+  const meridiem = timed[4].toUpperCase();
+  if (meridiem === "PM" && hour < 12) hour += 12;
+  if (meridiem === "AM" && hour === 12) hour = 0;
+  base.setHours(hour, minute, second, 0);
+  return base.getTime();
+}
+
+function filterDreamBotLogSince(text, sinceMs, referenceMs = Date.now()) {
+  const parsedSince = Number(sinceMs);
+  if (!Number.isFinite(parsedSince) || parsedSince <= 0) return String(text || "");
+  return String(text || "")
+    .split(/\r?\n/)
+    .filter((line) => {
+      const timestamp = parseDreamBotLogTimestamp(line, referenceMs);
+      return timestamp ? timestamp >= parsedSince : false;
+    })
+    .join("\n");
 }
 
 function extractNickCaptureRuntimeError(text) {
@@ -1503,8 +1541,7 @@ async function waitForCapturedCharName({ index, account, startedAt, stdoutPath, 
     let banReason = extractBanStatusFromText(stdout);
 
     if (!charName) {
-      const dreamBotLogPath = await findLatestDreamBotLog(account.email, startedMs - 5000);
-      const dreamBotLog = dreamBotLogPath ? await readTextTail(dreamBotLogPath, 12000) : "";
+      const { text: dreamBotLog } = await readLatestDreamBotLogSince(account.email, startedMs, 12000);
       charName = extractCharNameFromText(dreamBotLog);
       if (!banReason) banReason = extractBanStatusFromText(dreamBotLog);
     }
@@ -1606,8 +1643,7 @@ async function discoverCharNamesFromLogs(config, rows, launches) {
     const stdout = await readTextTail(launch.stdout, 4000);
     let charName = extractCharNameFromText(stdout);
     if (!charName) {
-      const dreamBotLogPath = await findLatestDreamBotLog(launch.email, launchTime - 5000);
-      const dreamBotLog = dreamBotLogPath ? await readTextTail(dreamBotLogPath, 8000) : "";
+      const { text: dreamBotLog } = await readLatestDreamBotLogSince(launch.email, launchTime, 8000);
       charName = extractCharNameFromText(dreamBotLog);
     }
 
@@ -2310,10 +2346,9 @@ async function reconcileLaunches(launches, javaProcesses = []) {
     const isFreshLaunch = Date.now() - launchTime < 5 * 60 * 1000;
     let status = client ? "Running" : directRunning && isFreshLaunch ? "Starting" : "StoppedOrUnknown";
     const stdout = await readTextTail(launch.stdout, 2500);
-    const dreamBotLogPath = normalizeBotClient(launch.botClient) === "dreambot"
-      ? await findLatestDreamBotLog(launch.email, launchTime - 5000)
-      : "";
-    const dreamBotLog = dreamBotLogPath ? await readTextTail(dreamBotLogPath, 12000) : "";
+    const { text: dreamBotLog } = normalizeBotClient(launch.botClient) === "dreambot"
+      ? await readLatestDreamBotLogSince(launch.email, launchTime, 12000)
+      : { text: "" };
     const banReason = extractBanStatusFromText(`${stdout}\n${dreamBotLog}`);
     const completionReason = banReason
       ? `Conta banida: ${banReason}`
@@ -2423,8 +2458,7 @@ function formatDurationMs(ms) {
 async function getLaunchTailForNotification(launch, includeLogTail) {
   if (!includeLogTail) return "";
   const launchTime = new Date(launch.startedAt || 0).getTime();
-  const dreamBotLogPath = await findLatestDreamBotLog(launch.email, launchTime - 5000);
-  const dreamBotLog = dreamBotLogPath ? await readTextTail(dreamBotLogPath, 1600) : "";
+  const { text: dreamBotLog } = await readLatestDreamBotLogSince(launch.email, launchTime, 1600);
   const stdout = await readTextTail(launch.stdout, 1600);
   const text = (dreamBotLog || stdout || "").trim();
   return text.length > 1400 ? text.slice(-1400) : text;
@@ -2787,10 +2821,9 @@ async function buildAiAnalysisContext(body = {}) {
       const stdout = await readTextTail(launch.stdout, 3500);
       const stderr = await readTextTail(launch.stderr, 1800);
       const launchTime = new Date(launch.startedAt || 0).getTime();
-      const dreamBotLogPath = normalizeBotClient(launch.botClient) === "dreambot"
-        ? await findLatestDreamBotLog(launch.email, launchTime - 5000)
-        : "";
-      const dreamBotLog = dreamBotLogPath ? await readTextTail(dreamBotLogPath, 3500) : "";
+      const { text: dreamBotLog } = normalizeBotClient(launch.botClient) === "dreambot"
+        ? await readLatestDreamBotLogSince(launch.email, launchTime, 3500)
+        : { text: "" };
       logSections.push({
         name: `launch index ${launch.index} pid ${launch.pid}`,
         text: redactSensitiveText(truncateText([stdout, stderr, dreamBotLog].filter(Boolean).join("\n\n"), 7000)),
@@ -3834,8 +3867,7 @@ async function monitorCheckerNickCapture({ index, account, startedAt, stdoutPath
 
   while (Date.now() < deadline) {
     const stdout = await readTextTail(stdoutPath, 8000);
-    const dreamBotLogPath = await findLatestDreamBotLog(account.email, startedMs - 5000);
-    const dreamBotLog = dreamBotLogPath ? await readTextTail(dreamBotLogPath, 12000) : "";
+    const { text: dreamBotLog } = await readLatestDreamBotLogSince(account.email, startedMs, 12000);
     const combined = `${stdout}\n${dreamBotLog}`;
     const banReason = extractBanStatusFromText(combined);
     const runtimeError = extractNickCaptureRuntimeError(combined);
@@ -4284,6 +4316,19 @@ async function findLatestDreamBotLog(email, notBefore = 0) {
   return latest;
 }
 
+async function readLatestDreamBotLogSince(email, sinceMs, maxChars = 12000) {
+  const startedMs = Number(sinceMs || 0);
+  const dreamBotLogPath = await findLatestDreamBotLog(email, startedMs - 5000);
+  if (!dreamBotLogPath) return { path: "", text: "" };
+  const fullText = await readTextTail(dreamBotLogPath, Math.max(maxChars * 2, 24000));
+  const info = await stat(dreamBotLogPath).catch(() => null);
+  const filtered = filterDreamBotLogSince(fullText, startedMs - 5000, info?.mtimeMs || Date.now());
+  return {
+    path: dreamBotLogPath,
+    text: filtered.length > maxChars ? filtered.slice(-maxChars) : filtered,
+  };
+}
+
 async function getLaunchLog(body) {
   const pid = Number(body.pid);
   if (!Number.isInteger(pid)) throw new Error("Invalid pid.");
@@ -4291,9 +4336,9 @@ async function getLaunchLog(body) {
   const launch = launches.find((item) => Number(item.pid) === pid || Number(item.effectivePid) === pid);
   if (!launch) throw new Error("Launch not found.");
   const launchTime = new Date(launch.startedAt || 0).getTime();
-  const dreamBotLogPath = await findLatestDreamBotLog(launch.email, launchTime - 5000);
-  const dreamBotLog = dreamBotLogPath
-    ? await readTextTail(dreamBotLogPath, 12000)
+  const dreamBotLogInfo = await readLatestDreamBotLogSince(launch.email, launchTime, 12000);
+  const dreamBotLog = dreamBotLogInfo.path
+    ? dreamBotLogInfo.text || "Nenhuma linha nova do DreamBot foi criada para este launch."
     : "Nenhum log novo do DreamBot foi criado para este launch. O launcher provavelmente fechou antes de abrir o cliente.";
 
   return {
@@ -4307,7 +4352,7 @@ async function getLaunchLog(body) {
     commandPreview: launch.commandPreview || "",
     stdoutPath: launch.stdout,
     stderrPath: launch.stderr,
-    dreamBotLogPath,
+    dreamBotLogPath: dreamBotLogInfo.path,
     stdout: await readTextTail(launch.stdout),
     stderr: await readTextTail(launch.stderr),
     dreamBotLog,
